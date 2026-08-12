@@ -12,38 +12,95 @@
     <!-- 收起态:胶囊条 -->
     <div id="pill" class="pill" data-tauri-drag-region>
       <span class="chev" data-tauri-drag-region>›</span>
-      <span class="title" data-tauri-drag-region>HackerTrip</span>
+      <span class="title" id="pill-title" data-tauri-drag-region>HackerTrip</span>
       <span class="spacer" data-tauri-drag-region></span>
-      <span class="badge mono" id="pill-tokens">今日 —</span>
+      <span class="badge mono" id="pill-main">—</span>
       <span class="badge green" id="pill-status">读取中</span>
     </div>
 
     <!-- 展开态:面板 -->
     <div id="panel" class="panel hidden">
-      <div class="panel-header" data-tauri-drag-region>
-        <span class="chev">⌄</span>
+      <div class="panel-header">
+        <span class="chev" id="collapse-btn">⌄</span>
         <span class="title" data-tauri-drag-region>HackerTrip</span>
         <span class="spacer" data-tauri-drag-region></span>
-        <span class="badge mono" id="panel-tokens">今日 —</span>
+        <div class="seg" id="mode-seg">
+          <button class="seg-btn" data-mode="daily">日常</button>
+          <button class="seg-btn" data-mode="hackathon">比赛</button>
+        </div>
       </div>
 
-      <div class="row">
-        <span class="icon timer">✳</span>
-        <span class="label">今日 Agent 用量</span>
-        <span class="spacer"></span>
-        <span class="sub mono" id="detail-tokens">—</span>
+      <!-- ============ 日常模式 ============ -->
+      <div id="daily-view">
+        <div class="row">
+          <span class="icon timer">✳</span>
+          <span class="label">今日 Agent 用量</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="d-tokens">—</span>
+        </div>
+        <div class="section-title">运行中的 Coding Agent</div>
+        <div id="agent-list"><div class="row"><span class="sub">检测中…</span></div></div>
+        <div class="section-title">今日开发数据</div>
+        <div id="repo-list"><div class="row"><span class="sub">统计中…</span></div></div>
+        <div class="row">
+          <button class="action" id="summary-btn">生成今日 AI 总结</button>
+          <span class="sub">每晚 22:00 也会自动提醒</span>
+        </div>
+        <div id="summary-out" class="summary hidden"></div>
       </div>
-      <div class="row">
-        <span class="icon check">✓</span>
-        <span class="label">今日会话</span>
-        <span class="spacer"></span>
-        <span class="sub mono" id="detail-sessions">—</span>
-      </div>
-      <div class="row">
-        <span class="icon dots">⠿</span>
-        <span class="label">比赛倒计时 / 报名提醒 / commit 监控</span>
-        <span class="spacer"></span>
-        <span class="sub">待接入</span>
+
+      <!-- ============ 比赛模式 ============ -->
+      <div id="hackathon-view" class="hidden">
+        <!-- 未配置比赛:设置表单 -->
+        <div id="event-form">
+          <div class="section-title">设置当前比赛</div>
+          <div class="form-row">
+            <input id="ev-name" type="text" placeholder="比赛名称,如 AdventureX 2026" />
+          </div>
+          <div class="form-row">
+            <label class="sub">开始</label>
+            <input id="ev-start" type="datetime-local" />
+            <label class="sub">提交截止</label>
+            <input id="ev-end" type="datetime-local" />
+          </div>
+          <div class="form-row">
+            <button class="action" id="ev-save">开始比赛</button>
+          </div>
+        </div>
+
+        <!-- 已配置比赛:作战面板 -->
+        <div id="event-live" class="hidden">
+          <div class="row" style="flex-wrap: wrap">
+            <span class="icon timer">◷</span>
+            <div style="flex: 1">
+              <div style="display: flex; align-items: baseline; gap: 10px">
+                <span class="countdown mono" id="h-countdown">—</span>
+                <span class="sub">距作品提交截止</span>
+              </div>
+              <div class="phases" id="h-phases"></div>
+            </div>
+          </div>
+          <div class="row">
+            <span class="icon" style="background: rgba(255, 255, 255, 0.08)">✳</span>
+            <span class="label">本场 Agent 用量</span>
+            <span class="spacer"></span>
+            <span class="sub mono" id="h-tokens">—</span>
+          </div>
+          <div class="row">
+            <span class="icon check" id="h-commit-icon">✓</span>
+            <span class="label">最近 commit</span>
+            <span class="sub" id="h-commit">—</span>
+            <span class="spacer"></span>
+            <span class="badge mono" id="h-commit-count">—</span>
+          </div>
+          <div class="section-title">提交材料清单</div>
+          <div id="checklist"></div>
+          <div class="row">
+            <span class="sub link" id="ev-edit">修改比赛信息</span>
+            <span class="spacer"></span>
+            <span class="sub link" id="ev-finish">结束比赛</span>
+          </div>
+        </div>
       </div>
     </div>
   </body>

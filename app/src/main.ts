@@ -560,8 +560,8 @@ window.addEventListener("DOMContentLoaded", () => {
   updateLoginStatus();
   $("s-savekey").addEventListener("click", () => {
     store.set("apiKey", keyInput.value.trim());
-    updateLoginStatus();
-    $("s-sync-status").textContent = keyInput.value.trim() ? "密钥已保存,账号已绑定" : "密钥已清除";
+    updateLoginStatus(); // 绑定状态行显示结果,同步行保留上次同步时间
+    updateSyncStatus();
   });
   $("s-login").addEventListener("click", () => void githubLogin());
   $("s-paircode").addEventListener("click", () => void showPairCode());

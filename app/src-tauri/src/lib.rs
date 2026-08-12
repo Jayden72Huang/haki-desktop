@@ -764,8 +764,8 @@ async fn github_login(endpoint_base: Option<String>) -> Result<String, String> {
         listener
             .set_nonblocking(false)
             .map_err(|e| e.to_string())?;
-        // 3 分钟内等待浏览器回调
-        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        // 10 分钟内等待浏览器回调(首次可能要走完整 GitHub 授权,耗时较长)
+        let deadline = std::time::Instant::now() + Duration::from_secs(600);
         listener
             .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
@@ -774,7 +774,7 @@ async fn github_login(endpoint_base: Option<String>) -> Result<String, String> {
                 Ok((s, _)) => break s,
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if std::time::Instant::now() > deadline {
-                        return Err("等待登录超时(3 分钟),请重试".into());
+                        return Err("等待登录超时,请重试(已在网站登录的话,重点一次按钮即可)".into());
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }

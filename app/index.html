@@ -30,6 +30,53 @@
         </div>
       </div>
 
+      <!-- 网站入口(浏览器打开) -->
+      <div class="tabs">
+        <button class="tab" data-url="https://hackertrip.space/explore">赛事 ↗</button>
+        <button class="tab" data-url="https://hackertrip.space/dashboard">我的 ↗</button>
+        <button class="tab" data-url="https://hackertrip.space/guides">指南 ↗</button>
+        <span class="spacer"></span>
+        <button class="tab" id="tab-settings">设置</button>
+      </div>
+
+      <div id="panel-body">
+
+      <!-- ============ 设置 ============ -->
+      <div id="settings-view" class="hidden">
+        <div class="section-title">账号绑定与云端同步</div>
+        <div class="form-row">
+          <input id="s-apikey" type="password" placeholder="粘贴 API Key(ht_live_ 开头)" />
+          <button class="action" id="s-savekey">保存</button>
+        </div>
+        <div class="row">
+          <span class="sub">还没有密钥?去网站登录后生成,即完成身份绑定</span>
+          <span class="spacer"></span>
+          <button class="tab" data-url="https://hackertrip.space/cli">获取密钥 ↗</button>
+        </div>
+        <div class="row">
+          <button class="action" id="s-sync">立即同步到云端</button>
+          <span class="sub" id="s-sync-status">—</span>
+        </div>
+        <div class="row">
+          <span class="label">同步内容</span>
+          <span class="spacer"></span>
+          <span class="sub">近 30 天:token 消耗 · skills 使用榜 · 各项目投入时长 · 关联仓库名</span>
+        </div>
+        <div class="row">
+          <span class="label">隐私</span>
+          <span class="spacer"></span>
+          <span class="sub">只上报统计特征与仓库名,源码/对话/本地路径不出本机</span>
+        </div>
+        <div class="row">
+          <span class="label">版本</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-version">—</span>
+        </div>
+        <div class="row">
+          <button class="action danger" id="s-quit">退出应用</button>
+        </div>
+      </div>
+
       <!-- ============ 日常模式 ============ -->
       <div id="daily-view">
         <div class="row">
@@ -102,6 +149,8 @@
           </div>
         </div>
       </div>
+
+      </div><!-- /panel-body -->
     </div>
   </body>
 </html>

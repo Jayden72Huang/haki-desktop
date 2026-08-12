@@ -272,6 +272,56 @@ body {
   width: 56px;
 }
 
+/* ============ 网站入口 tabs ============ */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 8px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.06);
+}
+
+.tab {
+  border: 0.5px solid var(--border);
+  background: var(--surface);
+  color: var(--sub);
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.tab:hover {
+  color: var(--text);
+  border-color: rgba(139, 79, 232, 0.5);
+}
+
+/* ============ 面板内容滚动区 ============ */
+#panel-body {
+  max-height: 500px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#panel-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+#panel-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 2px;
+}
+
+#panel-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.action.danger {
+  background: rgba(255, 93, 77, 0.16);
+  color: var(--urgent);
+}
+
 /* ============ 模式切换 ============ */
 .seg {
   display: flex;

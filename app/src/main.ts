@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   isPermissionGranted,
   requestPermission,
@@ -88,6 +89,7 @@ let agents: AgentProc[] = [];
 let agentStatus: Record<string, AgentStatus> = {};
 let repos: RepoToday[] = [];
 let event = store.get<HackEvent | null>("event", null);
+let showSettings = false;
 const openRows = new Set<string>();
 
 const PHASES = [
@@ -173,13 +175,16 @@ function markViewed(cwd: string) {
 function render() {
   renderPill();
   if (!expanded) return;
-  $("daily-view").classList.toggle("hidden", mode !== "daily");
-  $("hackathon-view").classList.toggle("hidden", mode !== "hackathon");
+  $("settings-view").classList.toggle("hidden", !showSettings);
+  $("daily-view").classList.toggle("hidden", showSettings || mode !== "daily");
+  $("hackathon-view").classList.toggle("hidden", showSettings || mode !== "hackathon");
   document.querySelectorAll<HTMLButtonElement>(".seg-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.mode === mode);
   });
-  if (mode === "daily") renderDaily();
-  else renderHackathon();
+  if (!showSettings) {
+    if (mode === "daily") renderDaily();
+    else renderHackathon();
+  }
   void fitWindow();
 }
 
@@ -419,6 +424,33 @@ function saveEvent() {
   render();
 }
 
+/* ---------- 云端同步 ---------- */
+function updateSyncStatus() {
+  const last = store.get<string>("lastSyncAt", "");
+  $("s-sync-status").textContent = last ? `上次同步 ${new Date(last).toLocaleString()}` : "尚未同步";
+}
+
+async function syncNow(silent: boolean) {
+  const apiKey = store.get<string>("apiKey", "");
+  if (!apiKey) {
+    if (!silent) $("s-sync-status").textContent = "请先保存 API Key";
+    return;
+  }
+  const btn = $("s-sync") as HTMLButtonElement;
+  btn.disabled = true;
+  if (!silent) $("s-sync-status").textContent = "聚合数据并上报中…";
+  try {
+    await invoke<string>("sync_profile", { apiKey, days: 30, endpoint: null });
+    store.set("lastSyncAt", new Date().toISOString());
+    store.set("lastSyncDay", new Date().toISOString().slice(0, 10));
+    updateSyncStatus();
+  } catch (e) {
+    $("s-sync-status").textContent = `同步失败:${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* ---------- 展开/收起 ---------- */
 async function setExpanded(next: boolean) {
   expanded = next;
@@ -440,9 +472,39 @@ window.addEventListener("DOMContentLoaded", () => {
     b.addEventListener("click", () => {
       mode = b.dataset.mode as Mode;
       store.set("mode", mode);
+      showSettings = false;
       render();
     });
   });
+
+  // 网站入口 + 设置
+  document.querySelectorAll<HTMLButtonElement>(".tab[data-url]").forEach((b) => {
+    b.addEventListener("click", () => void openUrl(b.dataset.url!));
+  });
+  $("tab-settings").addEventListener("click", () => {
+    showSettings = !showSettings;
+    render();
+  });
+  $("s-quit").addEventListener("click", () => void getCurrentWindow().close());
+  void invoke<Record<string, string>>("app_meta")
+    .then((m) => ($("s-version").textContent = `v${m.version}`))
+    .catch(() => {});
+
+  // 账号绑定 + 云端同步
+  const keyInput = $("s-apikey") as HTMLInputElement;
+  keyInput.value = store.get<string>("apiKey", "");
+  updateSyncStatus();
+  $("s-savekey").addEventListener("click", () => {
+    store.set("apiKey", keyInput.value.trim());
+    $("s-sync-status").textContent = keyInput.value.trim() ? "密钥已保存,账号已绑定" : "密钥已清除";
+  });
+  $("s-sync").addEventListener("click", () => void syncNow(false));
+
+  // 每天首次启动自动同步一次(已绑定的情况下)
+  const today = new Date().toISOString().slice(0, 10);
+  if (store.get<string>("apiKey", "") && store.get<string>("lastSyncDay", "") !== today) {
+    setTimeout(() => void syncNow(true), 5_000);
+  }
 
   $("summary-btn").addEventListener("click", () => void generateSummary());
   $("ev-save").addEventListener("click", saveEvent);

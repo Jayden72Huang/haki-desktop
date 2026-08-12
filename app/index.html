@@ -44,18 +44,28 @@
       <!-- ============ 设置 ============ -->
       <div id="settings-view" class="hidden">
         <div class="section-title">账号绑定与云端同步</div>
-        <div class="form-row">
-          <input id="s-apikey" type="password" placeholder="粘贴 API Key(ht_live_ 开头)" />
-          <button class="action" id="s-savekey">保存</button>
-        </div>
         <div class="row">
-          <span class="sub">还没有密钥?去网站登录后生成,即完成身份绑定</span>
-          <span class="spacer"></span>
-          <button class="tab" data-url="https://hackertrip.space/cli">获取密钥 ↗</button>
+          <button class="action" id="s-login">使用 GitHub 登录并绑定</button>
+          <span class="sub" id="s-login-status">未绑定</span>
         </div>
         <div class="row">
           <button class="action" id="s-sync">立即同步到云端</button>
           <span class="sub" id="s-sync-status">—</span>
+        </div>
+        <div class="section-title">小程序互绑</div>
+        <div class="row">
+          <button class="action" id="s-paircode">生成绑定二维码</button>
+          <span class="countdown mono" id="s-code">——</span>
+          <span class="sub">小程序「我的 → 绑定网站账号 → 扫码」,10 分钟有效</span>
+        </div>
+        <div class="row hidden" id="s-qr-row">
+          <img id="s-qr" class="qr" alt="绑定二维码" />
+          <span class="sub">用小程序里的「扫码绑定」扫这个码,也可以手动输入左上方 6 位数字</span>
+        </div>
+        <div class="section-title">高级</div>
+        <div class="form-row">
+          <input id="s-apikey" type="password" placeholder="也可手动粘贴 API Key(ht_live_ 开头)" />
+          <button class="action" id="s-savekey">保存</button>
         </div>
         <div class="row">
           <span class="label">同步内容</span>

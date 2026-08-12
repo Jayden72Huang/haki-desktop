@@ -6,6 +6,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import QRCode from "qrcode";
 
 /* ---------- 类型 ---------- */
 interface ProjectToday {
@@ -292,6 +293,15 @@ function renderDaily() {
 }
 
 /* ---------- 每日 AI 总结 ---------- */
+/** 轻量 markdown 渲染:先转义 HTML,再处理加粗/分隔线/序号行,足够覆盖总结输出 */
+function mdLite(src: string): string {
+  return esc(src)
+    .replace(/^-{3,}\s*$/gm, "<hr>")
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/^(\d+)\.\s+/gm, '<span class="md-num">$1.</span> ')
+    .replace(/\n/g, "<br>");
+}
+
 function summaryPayload(): string {
   return JSON.stringify({
     date: new Date().toISOString().slice(0, 10),
@@ -312,7 +322,7 @@ async function generateSummary() {
   out.textContent = "";
   try {
     const text = await invoke<string>("ai_daily_summary", { data: summaryPayload() });
-    out.textContent = text;
+    out.innerHTML = mdLite(text);
   } catch (e) {
     out.textContent = `生成失败:${e}`;
   } finally {
@@ -424,6 +434,59 @@ function saveEvent() {
   render();
 }
 
+/* ---------- 账号绑定 ---------- */
+function updateLoginStatus() {
+  const bound = !!store.get<string>("apiKey", "");
+  $("s-login-status").textContent = bound ? "已绑定 ✓" : "未绑定";
+}
+
+async function githubLogin() {
+  const btn = $("s-login") as HTMLButtonElement;
+  btn.disabled = true;
+  $("s-login-status").textContent = "浏览器中完成 GitHub 授权…";
+  try {
+    const key = await invoke<string>("github_login", { endpointBase: null });
+    store.set("apiKey", key);
+    ($("s-apikey") as HTMLInputElement).value = key;
+    updateLoginStatus();
+    $("s-login-status").textContent = "已绑定 ✓";
+    void syncNow(true); // 登录成功立即同步一次
+  } catch (e) {
+    $("s-login-status").textContent = `${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function showPairCode() {
+  const apiKey = store.get<string>("apiKey", "");
+  if (!apiKey) {
+    $("s-code").textContent = "先登录";
+    return;
+  }
+  const btn = $("s-paircode") as HTMLButtonElement;
+  btn.disabled = true;
+  $("s-code").textContent = "……";
+  try {
+    const code = await invoke<string>("request_pair_code", { apiKey, endpointBase: null });
+    $("s-code").textContent = code;
+    // 同一个码渲染成二维码,小程序端 wx.scanCode 解析 ht-bind: 前缀
+    const dataUrl = await QRCode.toDataURL(`ht-bind:${code}`, {
+      width: 180,
+      margin: 1,
+      color: { dark: "#f2eef5", light: "#0a080e" },
+    });
+    ($("s-qr") as HTMLImageElement).src = dataUrl;
+    $("s-qr-row").classList.remove("hidden");
+    void fitWindow();
+  } catch (e) {
+    $("s-code").textContent = "失败";
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* ---------- 云端同步 ---------- */
 function updateSyncStatus() {
   const last = store.get<string>("lastSyncAt", "");
@@ -494,10 +557,14 @@ window.addEventListener("DOMContentLoaded", () => {
   const keyInput = $("s-apikey") as HTMLInputElement;
   keyInput.value = store.get<string>("apiKey", "");
   updateSyncStatus();
+  updateLoginStatus();
   $("s-savekey").addEventListener("click", () => {
     store.set("apiKey", keyInput.value.trim());
+    updateLoginStatus();
     $("s-sync-status").textContent = keyInput.value.trim() ? "密钥已保存,账号已绑定" : "密钥已清除";
   });
+  $("s-login").addEventListener("click", () => void githubLogin());
+  $("s-paircode").addEventListener("click", () => void showPairCode());
   $("s-sync").addEventListener("click", () => void syncNow(false));
 
   // 每天首次启动自动同步一次(已绑定的情况下)

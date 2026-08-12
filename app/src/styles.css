@@ -386,6 +386,24 @@ body {
   -webkit-user-select: text;
 }
 
+.summary hr {
+  border: none;
+  border-top: 0.5px solid var(--border);
+  margin: 8px 0;
+}
+
+.summary .md-num {
+  color: var(--purple-text);
+  font-weight: 600;
+}
+
+.qr {
+  width: 132px;
+  height: 132px;
+  border-radius: 12px;
+  border: 0.5px solid var(--border);
+}
+
 .link {
   cursor: pointer;
 }

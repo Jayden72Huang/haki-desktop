@@ -432,7 +432,8 @@ async fn ai_daily_summary(data: String) -> Result<String, String> {
              2. 今日亮点\n\
              3. 值得沉淀为 skill 的重复流程(根据项目和会话情况推测,没有就说暂无)\n\
              4. 明日建议\n\
-             直接输出内容,不要客套话。"
+             直接输出四行编号内容。不要客套话,不要 markdown 加粗和标题,\
+             不要在结尾附加任何分隔线、提示语或与总结无关的内容。"
         );
         let out = Command::new("claude")
             .args(["-p", &prompt])
@@ -730,6 +731,132 @@ async fn sync_profile(api_key: String, days: u32, endpoint: Option<String>) -> R
     .map_err(|e| e.to_string())?
 }
 
+// ============ GitHub 登录(浏览器授权 + 本地回环回调) ============
+
+/// 打开浏览器走网站的 GitHub OAuth,本地起临时端口接收回调,拿回 API Key。
+/// 全程密钥只经过 127.0.0.1 回环,不落中间服务。
+#[tauri::command]
+async fn github_login(endpoint_base: Option<String>) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = endpoint_base.unwrap_or_else(|| "https://hackertrip.space".to_string());
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|e| format!("本地端口监听失败: {e}"))?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        // state 防跨请求伪造:纳秒时间戳 + pid
+        let state = format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            std::process::id()
+        );
+
+        let auth_url = format!("{base}/api/desktop/auth?state={state}&port={port}");
+        Command::new("open")
+            .arg(&auth_url)
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {e}"))?;
+
+        listener
+            .set_nonblocking(false)
+            .map_err(|e| e.to_string())?;
+        // 3 分钟内等待浏览器回调
+        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| e.to_string())?;
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() > deadline {
+                        return Err("等待登录超时(3 分钟),请重试".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => return Err(format!("接收回调失败: {e}")),
+            }
+        };
+        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
+        let request = String::from_utf8_lossy(&buf[..n]);
+        let first_line = request.lines().next().unwrap_or("");
+        // 形如 GET /callback?key=ht_live_xxx&state=yyy HTTP/1.1
+        let query = first_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.split_once('?'))
+            .map(|(_, q)| q)
+            .unwrap_or("");
+        let mut key = String::new();
+        let mut got_state = String::new();
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                match k {
+                    "key" => key = v.to_string(),
+                    "state" => got_state = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+
+        let ok = !key.is_empty() && got_state == state && key.starts_with("ht_live_");
+        let body = if ok {
+            "<html><meta charset=utf-8><body style='background:#0a080e;color:#f2eef5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh'><div style='text-align:center'><h2>✅ 登录成功</h2><p>账号已绑定,可以回到 HackerTrip 桌面应用了</p></div></body></html>"
+        } else {
+            "<html><meta charset=utf-8><body style='background:#0a080e;color:#f2eef5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh'><div style='text-align:center'><h2>登录失败</h2><p>请回到应用重试</p></div></body></html>"
+        };
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .as_bytes(),
+        );
+
+        if ok {
+            Ok(key)
+        } else {
+            Err("回调校验失败,请重试".into())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 用 API Key 找服务端要一个小程序绑定码(6 位,10 分钟有效)
+#[tauri::command]
+async fn request_pair_code(api_key: String, endpoint_base: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = endpoint_base.unwrap_or_else(|| "https://hackertrip.space".to_string());
+        let resp = ureq::post(&format!("{base}/api/pair/code"))
+            .header("Authorization", &format!("Bearer {}", api_key.trim()))
+            .send_json(serde_json::json!({}));
+        match resp {
+            Ok(mut r) => {
+                let text = r.body_mut().read_to_string().map_err(|e| e.to_string())?;
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| e.to_string())?;
+                v["code"]
+                    .as_str()
+                    .map(String::from)
+                    .ok_or_else(|| format!("服务端响应异常: {text}"))
+            }
+            Err(ureq::Error::StatusCode(code)) => Err(format!("服务端返回 {code}(检查 API Key)")),
+            Err(e) => Err(format!("网络请求失败: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 供前端记录/读取轻量状态(比赛配置、清单勾选等存 localStorage,这里暂不需要)
 #[tauri::command]
 fn app_meta() -> HashMap<String, String> {
@@ -751,6 +878,8 @@ pub fn run() {
             ai_daily_summary,
             profile_stats,
             sync_profile,
+            github_login,
+            request_pair_code,
             app_meta
         ])
         .run(tauri::generate_context!())

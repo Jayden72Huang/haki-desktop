@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HackerTrip 悬浮窗原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh;
+    background: #3a3d44;
+    font-family: -apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 48px;
+    padding: 64px 24px 96px;
+    color: #e7e9ee;
+  }
+  .stage-label {
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    color: rgba(255,255,255,0.35);
+    margin-bottom: 14px;
+    text-align: center;
+  }
+
+  /* ============ 收起态:胶囊条 ============ */
+  .pill {
+    width: 640px;
+    max-width: 92vw;
+    height: 56px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 14px 0 18px;
+    background:
+      linear-gradient(90deg, rgba(13,15,18,0.96) 0%, rgba(15,18,20,0.94) 55%, rgba(30,52,42,0.88) 100%);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.45), inset 0 0 0 0.5px rgba(255,255,255,0.07);
+    cursor: pointer;
+  }
+  .chev { color: rgba(255,255,255,0.55); font-size: 13px; width: 14px; }
+  .pill .title { font-size: 15px; font-weight: 500; color: #f2f3f5; }
+  .spacer { flex: 1; }
+  .badge {
+    background: rgba(255,255,255,0.10);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.78);
+    white-space: nowrap;
+  }
+  .badge.green {
+    background: rgba(52, 211, 153, 0.16);
+    color: #34d399;
+    font-weight: 500;
+  }
+
+  /* ============ 展开态:面板 ============ */
+  .panel {
+    width: 640px;
+    max-width: 92vw;
+    border-radius: 20px;
+    padding: 18px 20px 20px;
+    background:
+      radial-gradient(120% 140% at 100% 20%, rgba(46, 92, 70, 0.35) 0%, rgba(20,26,24,0) 55%),
+      rgba(13,15,18,0.96);
+    box-shadow: 0 16px 48px rgba(0,0,0,0.5), inset 0 0 0 0.5px rgba(255,255,255,0.07);
+  }
+  .panel-header {
+    display: flex; align-items: center; gap: 14px; margin-bottom: 16px;
+  }
+  .panel-header .title { font-size: 16px; font-weight: 600; }
+  .counter { font-size: 14px; color: rgba(255,255,255,0.5); margin-left: 10px; }
+
+  .row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 2px;
+    font-size: 15px;
+  }
+  .row + .row { border-top: 0.5px solid rgba(255,255,255,0.05); }
+  .row .label { color: rgba(255,255,255,0.85); }
+  .row .sub { color: rgba(255,255,255,0.42); font-size: 13px; }
+
+  .icon {
+    width: 26px; height: 26px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; font-size: 13px;
+  }
+  .icon.check { background: #2f7cf6; color: #fff; }
+  .icon.warn  { background: rgba(250, 204, 21, 0.16); color: #facc15; }
+  .icon.dots  { color: rgba(255,255,255,0.4); font-size: 15px; letter-spacing: 1px; }
+  .icon.timer { background: rgba(52, 211, 153, 0.14); color: #34d399; }
+
+  .mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+  .countdown { font-size: 20px; font-weight: 600; color: #f2f3f5; letter-spacing: 0.02em; }
+
+  /* 阶段进度条 */
+  .phases { display: flex; gap: 6px; margin: 6px 0 2px; width: 100%; }
+  .phase { flex: 1; }
+  .phase .bar { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.10); }
+  .phase.done .bar { background: #34d399; }
+  .phase.now .bar { background: linear-gradient(90deg, #34d399 60%, rgba(255,255,255,0.10) 60%); }
+  .phase .name { font-size: 11px; color: rgba(255,255,255,0.38); margin-top: 6px; }
+  .phase.done .name, .phase.now .name { color: rgba(255,255,255,0.75); }
+
+  /* 额度进度条 */
+  .quota { flex: 1; display: flex; align-items: center; gap: 10px; }
+  .quota .track { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.10); overflow: hidden; }
+  .quota .fill { height: 100%; border-radius: 3px; background: #e7e9ee; }
+  .quota .pct { font-size: 13px; color: rgba(255,255,255,0.6); width: 38px; text-align: right; }
+  .quota .win { font-size: 13px; color: rgba(255,255,255,0.45); width: 22px; }
+
+  .strike { text-decoration: line-through; color: rgba(255,255,255,0.4); }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 0.75px solid rgba(255,255,255,0.22);
+    border-radius: 999px; padding: 3px 10px;
+    font-size: 13.5px; color: rgba(255,255,255,0.8);
+  }
+
+  .footnote {
+    width: 640px; max-width: 92vw;
+    font-size: 12px; line-height: 1.8;
+    color: rgba(255,255,255,0.35);
+  }
+  .footnote b { color: rgba(255,255,255,0.6); font-weight: 500; }
+</style>
+</head>
+<body>
+
+  <!-- 状态一:收起(平时挂在屏幕边缘) -->
+  <div>
+    <div class="stage-label">状态一 · 收起(日常)</div>
+    <div class="pill">
+      <span class="chev">›</span>
+      <span class="title">HackerTrip</span>
+      <span class="spacer"></span>
+      <span class="badge mono">今日 176.0M tokens</span>
+      <span class="badge green">额度充足</span>
+    </div>
+  </div>
+
+  <!-- 状态二:收起(比赛中) -->
+  <div>
+    <div class="stage-label">状态二 · 收起(比赛进行中)</div>
+    <div class="pill">
+      <span class="chev">›</span>
+      <span class="title">AdventureX 2026</span>
+      <span class="spacer"></span>
+      <span class="badge mono">距提交 31:24:16</span>
+      <span class="badge green">节奏正常</span>
+    </div>
+  </div>
+
+  <!-- 状态三:展开面板(比赛中) -->
+  <div>
+    <div class="stage-label">状态三 · 展开(比赛进行中)</div>
+    <div class="panel">
+      <div class="panel-header">
+        <span class="chev">⌄</span>
+        <span class="title">AdventureX 2026</span>
+        <span class="spacer"></span>
+        <span class="badge mono">本场 892.4M tokens</span>
+        <span class="counter">2/4</span>
+      </div>
+
+      <!-- 倒计时 + 比赛阶段 -->
+      <div class="row" style="flex-wrap: wrap;">
+        <span class="icon timer">◷</span>
+        <div style="flex:1">
+          <div style="display:flex; align-items:baseline; gap:10px;">
+            <span class="countdown mono">31:24:16</span>
+            <span class="sub">距作品提交截止</span>
+          </div>
+          <div class="phases">
+            <div class="phase done"><div class="bar"></div><div class="name">立项</div></div>
+            <div class="phase now"><div class="bar"></div><div class="name">核心功能</div></div>
+            <div class="phase"><div class="bar"></div><div class="name">打磨</div></div>
+            <div class="phase"><div class="bar"></div><div class="name">提交材料</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Claude 额度 -->
+      <div class="row">
+        <span class="icon" style="background: rgba(255,255,255,0.08);">✳</span>
+        <span class="label">Claude</span>
+        <div class="quota">
+          <span class="win">5h</span>
+          <div class="track"><div class="fill" style="width:21%"></div></div>
+          <span class="pct mono">21%</span>
+        </div>
+        <div class="quota">
+          <span class="win">7d</span>
+          <div class="track"><div class="fill" style="width:23%"></div></div>
+          <span class="pct mono">23%</span>
+        </div>
+      </div>
+
+      <!-- git 提交状态 -->
+      <div class="row">
+        <span class="icon check">✓</span>
+        <span class="label">最近一次 commit</span>
+        <span class="sub">8 分钟前 · feat: 提交页表单校验</span>
+        <span class="spacer"></span>
+        <span class="badge mono">今日 23 次</span>
+      </div>
+
+      <!-- 提交材料清单(冲刺阶段展开) -->
+      <div class="row">
+        <span class="icon check">✓</span>
+        <span class="strike">部署 <span class="chip">线上 demo</span> 可访问</span>
+      </div>
+      <div class="row">
+        <span class="icon dots">⠿</span>
+        <span class="label"><span class="chip">README</span> 补齐运行说明</span>
+      </div>
+      <div class="row">
+        <span class="icon dots">⠿</span>
+        <span class="label">录制 <span class="chip">演示视频</span> ≤ 3 分钟</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 状态四:提醒条(报名截止) -->
+  <div>
+    <div class="stage-label">状态四 · 提醒(报名截止前)</div>
+    <div class="pill">
+      <span class="icon warn" style="width:26px;height:26px;">!</span>
+      <span class="title">「外滩大会 AFAC2026」报名将于明天 18:00 截止</span>
+      <span class="spacer"></span>
+      <span class="badge">去报名</span>
+    </div>
+  </div>
+
+  <div class="footnote">
+    数据说明:今日 tokens(176.0M)、额度百分比、commit 信息均为你本机 <b>~/.claude</b> 日志与 git
+    的真实/示意数据混排 —— tokens 为真实解析结果,额度与 commit 为演示占位,接入后全部实时。
+    近 30 天真实统计:<b>4.13B tokens · 326 会话 · 活跃 87.7 小时</b>。
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HackerTrip</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <!-- 收起态:胶囊条 -->
+    <div id="pill" class="pill" data-tauri-drag-region>
+      <span class="chev" data-tauri-drag-region>›</span>
+      <span class="title" data-tauri-drag-region>HackerTrip</span>
+      <span class="spacer" data-tauri-drag-region></span>
+      <span class="badge mono" id="pill-tokens">今日 —</span>
+      <span class="badge green" id="pill-status">读取中</span>
+    </div>
+
+    <!-- 展开态:面板 -->
+    <div id="panel" class="panel hidden">
+      <div class="panel-header" data-tauri-drag-region>
+        <span class="chev">⌄</span>
+        <span class="title" data-tauri-drag-region>HackerTrip</span>
+        <span class="spacer" data-tauri-drag-region></span>
+        <span class="badge mono" id="panel-tokens">今日 —</span>
+      </div>
+
+      <div class="row">
+        <span class="icon timer">✳</span>
+        <span class="label">今日 Agent 用量</span>
+        <span class="spacer"></span>
+        <span class="sub mono" id="detail-tokens">—</span>
+      </div>
+      <div class="row">
+        <span class="icon check">✓</span>
+        <span class="label">今日会话</span>
+        <span class="spacer"></span>
+        <span class="sub mono" id="detail-sessions">—</span>
+      </div>
+      <div class="row">
+        <span class="icon dots">⠿</span>
+        <span class="label">比赛倒计时 / 报名提醒 / commit 监控</span>
+        <span class="spacer"></span>
+        <span class="sub">待接入</span>
+      </div>
+    </div>
+  </body>
+</html>

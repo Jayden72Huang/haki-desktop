@@ -1,0 +1,149 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+html,
+body {
+  background: transparent;
+  font-family: -apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+  color: #e7e9ee;
+  overflow: hidden;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============ 收起态:胶囊条 ============ */
+.pill {
+  height: 56px;
+  margin: 4px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px 0 18px;
+  background: linear-gradient(
+    90deg,
+    rgba(13, 15, 18, 0.96) 0%,
+    rgba(15, 18, 20, 0.94) 55%,
+    rgba(30, 52, 42, 0.88) 100%
+  );
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+}
+
+.chev {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+  width: 14px;
+}
+
+.title {
+  font-size: 15px;
+  font-weight: 500;
+  color: #f2f3f5;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.badge {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.78);
+  white-space: nowrap;
+}
+
+.badge.green {
+  background: rgba(52, 211, 153, 0.16);
+  color: #34d399;
+  font-weight: 500;
+}
+
+/* ============ 展开态:面板 ============ */
+.panel {
+  margin: 4px;
+  border-radius: 20px;
+  padding: 14px 20px 16px;
+  background:
+    radial-gradient(120% 140% at 100% 20%, rgba(46, 92, 70, 0.35) 0%, rgba(20, 26, 24, 0) 55%),
+    rgba(13, 15, 18, 0.96);
+  box-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.07);
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+
+.panel-header .title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 2px;
+  font-size: 15px;
+}
+
+.row + .row {
+  border-top: 0.5px solid rgba(255, 255, 255, 0.05);
+}
+
+.label {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.sub {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 13px;
+}
+
+.icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.icon.check {
+  background: #2f7cf6;
+  color: #fff;
+}
+
+.icon.timer {
+  background: rgba(52, 211, 153, 0.14);
+  color: #34d399;
+}
+
+.icon.dots {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 15px;
+  letter-spacing: 1px;
+}

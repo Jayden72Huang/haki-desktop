@@ -1,0 +1,444 @@
+{
+  "generatedAt": "2026-08-12T11:23:35.519Z",
+  "rangeDays": 30,
+  "totals": {
+    "input": 326131,
+    "output": 14239249,
+    "cacheWrite": 112981081,
+    "cacheRead": 3999111679,
+    "cost": 9183.98830185006,
+    "allTokens": 4126658140,
+    "sessions": 326,
+    "activeDays": 31,
+    "activeHours": 87.7,
+    "estCostUSD": 9183.99
+  },
+  "today": {
+    "input": 2616,
+    "output": 489903,
+    "cacheWrite": 4846258,
+    "cacheRead": 170631706,
+    "cost": 383.5968615000001,
+    "allTokens": 175970483
+  },
+  "byDay": [
+    {
+      "date": "2026-07-13",
+      "input": 45394,
+      "output": 383954,
+      "cacheWrite": 3454622,
+      "cacheRead": 128879523,
+      "cost": 287.57090700000003,
+      "allTokens": 132763493
+    },
+    {
+      "date": "2026-07-14",
+      "input": 66567,
+      "output": 358633,
+      "cacheWrite": 4012640,
+      "cacheRead": 116220776,
+      "cost": 277.46414399999986,
+      "allTokens": 120658616
+    },
+    {
+      "date": "2026-07-15",
+      "input": 12074,
+      "output": 409427,
+      "cacheWrite": 4836236,
+      "cacheRead": 145630690,
+      "cost": 340.0135949999999,
+      "allTokens": 150888427
+    },
+    {
+      "date": "2026-07-16",
+      "input": 9625,
+      "output": 754758,
+      "cacheWrite": 3377491,
+      "cacheRead": 133994755,
+      "cost": 321.07131375000006,
+      "allTokens": 138136629
+    },
+    {
+      "date": "2026-07-17",
+      "input": 2116,
+      "output": 256433,
+      "cacheWrite": 3292273,
+      "cacheRead": 69631671,
+      "cost": 185.44184025000004,
+      "allTokens": 73182493
+    },
+    {
+      "date": "2026-07-18",
+      "input": 4650,
+      "output": 283258,
+      "cacheWrite": 1970862,
+      "cacheRead": 58886271,
+      "cost": 146.59716900000006,
+      "allTokens": 61145041
+    },
+    {
+      "date": "2026-07-19",
+      "input": 8687,
+      "output": 489304,
+      "cacheWrite": 2859971,
+      "cacheRead": 78288717,
+      "cost": 207.8856367499999,
+      "allTokens": 81646679
+    },
+    {
+      "date": "2026-07-20",
+      "input": 14831,
+      "output": 755130,
+      "cacheWrite": 3999031,
+      "cacheRead": 166922429,
+      "cost": 382.22268975,
+      "allTokens": 171691421
+    },
+    {
+      "date": "2026-07-21",
+      "input": 13160,
+      "output": 1023979,
+      "cacheWrite": 8353910,
+      "cacheRead": 227147409,
+      "cost": 574.3527510000007,
+      "allTokens": 236538458
+    },
+    {
+      "date": "2026-07-22",
+      "input": 5263,
+      "output": 378320,
+      "cacheWrite": 2339609,
+      "cacheRead": 96201341,
+      "cost": 216.62262524999988,
+      "allTokens": 98924533
+    },
+    {
+      "date": "2026-07-23",
+      "input": 3960,
+      "output": 598630,
+      "cacheWrite": 3910014,
+      "cacheRead": 152354322,
+      "cost": 346.8008955000002,
+      "allTokens": 156866926
+    },
+    {
+      "date": "2026-07-24",
+      "input": 7838,
+      "output": 779886,
+      "cacheWrite": 5619916,
+      "cacheRead": 170369105,
+      "cost": 419.53610249999997,
+      "allTokens": 176776745
+    },
+    {
+      "date": "2026-07-25",
+      "input": 1105,
+      "output": 395897,
+      "cacheWrite": 2718325,
+      "cacheRead": 126358777,
+      "cost": 270.21560925000006,
+      "allTokens": 129474104
+    },
+    {
+      "date": "2026-07-26",
+      "input": 11549,
+      "output": 836328,
+      "cacheWrite": 5536746,
+      "cacheRead": 285303945,
+      "cost": 594.6677399999992,
+      "allTokens": 291688568
+    },
+    {
+      "date": "2026-07-27",
+      "input": 5348,
+      "output": 304085,
+      "cacheWrite": 10229635,
+      "cacheRead": 150952048,
+      "cost": 441.12032325,
+      "allTokens": 161491116
+    },
+    {
+      "date": "2026-07-28",
+      "input": 15233,
+      "output": 1062966,
+      "cacheWrite": 7692720,
+      "cacheRead": 304727362,
+      "cost": 675.3703626,
+      "allTokens": 313498281
+    },
+    {
+      "date": "2026-07-29",
+      "input": 10535,
+      "output": 635801,
+      "cacheWrite": 4480100,
+      "cacheRead": 116215121,
+      "cost": 306.1676565,
+      "allTokens": 121341557
+    },
+    {
+      "date": "2026-07-30",
+      "input": 6831,
+      "output": 387010,
+      "cacheWrite": 2769337,
+      "cacheRead": 86550929,
+      "cost": 210.87967725000004,
+      "allTokens": 89714107
+    },
+    {
+      "date": "2026-07-31",
+      "input": 1472,
+      "output": 176868,
+      "cacheWrite": 1902492,
+      "cacheRead": 40357177,
+      "cost": 109.49467049999997,
+      "allTokens": 42438009
+    },
+    {
+      "date": "2026-08-01",
+      "input": 3046,
+      "output": 79549,
+      "cacheWrite": 569686,
+      "cacheRead": 7252225,
+      "cost": 27.571815000000008,
+      "allTokens": 7904506
+    },
+    {
+      "date": "2026-08-02",
+      "input": 2298,
+      "output": 543585,
+      "cacheWrite": 3752566,
+      "cacheRead": 204722489,
+      "cost": 418.2476909999997,
+      "allTokens": 209020938
+    },
+    {
+      "date": "2026-08-03",
+      "input": 3004,
+      "output": 1114810,
+      "cacheWrite": 5551520,
+      "cacheRead": 560657052,
+      "cost": 1028.7323880000006,
+      "allTokens": 567326386
+    },
+    {
+      "date": "2026-08-04",
+      "input": 2560,
+      "output": 173447,
+      "cacheWrite": 2732801,
+      "cacheRead": 38517917,
+      "cost": 122.06381925000001,
+      "allTokens": 41426725
+    },
+    {
+      "date": "2026-08-05",
+      "input": 2043,
+      "output": 99448,
+      "cacheWrite": 2624162,
+      "cacheRead": 28098767,
+      "cost": 98.840433,
+      "allTokens": 30824420
+    },
+    {
+      "date": "2026-08-06",
+      "input": 2340,
+      "output": 235909,
+      "cacheWrite": 656684,
+      "cacheRead": 57184160,
+      "cost": 115.81734000000007,
+      "allTokens": 58079093
+    },
+    {
+      "date": "2026-08-07",
+      "input": 126,
+      "output": 34978,
+      "cacheWrite": 528527,
+      "cacheRead": 14782003,
+      "cost": 34.708125749999994,
+      "allTokens": 15345634
+    },
+    {
+      "date": "2026-08-08",
+      "input": 14307,
+      "output": 89673,
+      "cacheWrite": 419659,
+      "cacheRead": 9974136,
+      "cost": 29.76989025,
+      "allTokens": 10497775
+    },
+    {
+      "date": "2026-08-09",
+      "input": 18667,
+      "output": 433786,
+      "cacheWrite": 3414100,
+      "cacheRead": 94088899,
+      "cost": 237.9616785000001,
+      "allTokens": 97955452
+    },
+    {
+      "date": "2026-08-10",
+      "input": 12476,
+      "output": 607003,
+      "cacheWrite": 3711281,
+      "cacheRead": 149975754,
+      "cost": 340.2625147499999,
+      "allTokens": 154306514
+    },
+    {
+      "date": "2026-08-11",
+      "input": 16410,
+      "output": 66491,
+      "cacheWrite": 817907,
+      "cacheRead": 8234203,
+      "cost": 32.92003575,
+      "allTokens": 9135011
+    },
+    {
+      "date": "2026-08-12",
+      "input": 2616,
+      "output": 489903,
+      "cacheWrite": 4846258,
+      "cacheRead": 170631706,
+      "cost": 383.5968615000001,
+      "allTokens": 175970483
+    }
+  ],
+  "byModel": [
+    {
+      "model": "claude-fable-5",
+      "input": 204685,
+      "output": 7885104,
+      "cacheWrite": 64745497,
+      "cacheRead": 2183667533,
+      "cost": 5083.93244325002,
+      "allTokens": 2256502819
+    },
+    {
+      "model": "claude-opus-5",
+      "input": 69702,
+      "output": 4510619,
+      "cacheWrite": 34146717,
+      "cacheRead": 1432763682,
+      "cost": 3128.738421749991,
+      "allTokens": 1471490720
+    },
+    {
+      "model": "claude-opus-4-8",
+      "input": 51742,
+      "output": 1842906,
+      "cacheWrite": 13699444,
+      "cacheRead": 382654167,
+      "cost": 969.8399055000007,
+      "allTokens": 398248259
+    },
+    {
+      "model": "claude-sonnet-5",
+      "input": 2,
+      "output": 620,
+      "cacheWrite": 389423,
+      "cacheRead": 26297,
+      "cost": 1.47753135,
+      "allTokens": 416342
+    },
+    {
+      "model": "<synthetic>",
+      "input": 0,
+      "output": 0,
+      "cacheWrite": 0,
+      "cacheRead": 0,
+      "cost": 0,
+      "allTokens": 0
+    }
+  ],
+  "topProjects": [
+    {
+      "project": "-Users-jaydenworkplace-hackertrip-recovery-hackertrip-miniprogram",
+      "input": 37764,
+      "output": 4462174,
+      "cacheWrite": 33007894,
+      "cacheRead": 1647018378,
+      "cost": 3418.7449640999994,
+      "allTokens": 1684526210
+    },
+    {
+      "project": "-Users-jaydenworkplace-Desktop-hyrox",
+      "input": 128794,
+      "output": 4437261,
+      "cacheWrite": 40292005,
+      "cacheRead": 1275204201,
+      "cost": 3003.007880250003,
+      "allTokens": 1320062261
+    },
+    {
+      "project": "-Users-jaydenworkplace-Desktop-hacker-trip-hackertrip-miniprogram",
+      "input": 6332,
+      "output": 1064963,
+      "cacheWrite": 10896561,
+      "cacheRead": 308637413,
+      "cost": 747.2338432500004,
+      "allTokens": 320605269
+    },
+    {
+      "project": "-",
+      "input": 29322,
+      "output": 1497202,
+      "cacheWrite": 7495599,
+      "cacheRead": 179567002,
+      "cost": 522.6229642500015,
+      "allTokens": 188589125
+    },
+    {
+      "project": "-Users-jaydenworkplace-projects-hyrox",
+      "input": 8380,
+      "output": 525846,
+      "cacheWrite": 3727049,
+      "cacheRead": 147350864,
+      "cost": 330.4726147499999,
+      "allTokens": 151612139
+    },
+    {
+      "project": "-Users-jaydenworkplace-projects-OPC-ATM-AGENT-OS",
+      "input": 1413,
+      "output": 320459,
+      "cacheWrite": 2312552,
+      "cacheRead": 74057692,
+      "cost": 178.50250799999992,
+      "allTokens": 76692116
+    },
+    {
+      "project": "-Users-jaydenworkplace-projects-AI-----",
+      "input": 861,
+      "output": 286700,
+      "cacheWrite": 1821849,
+      "cacheRead": 73550989,
+      "cost": 166.00156725,
+      "allTokens": 75660399
+    },
+    {
+      "project": "-Users-jaydenworkplace",
+      "input": 984,
+      "output": 199071,
+      "cacheWrite": 1699109,
+      "cacheRead": 64257881,
+      "cost": 143.19020025,
+      "allTokens": 66157045
+    },
+    {
+      "project": "-Users-jaydenworkplace-3d-pipeline",
+      "input": 103639,
+      "output": 601515,
+      "cacheWrite": 3635475,
+      "cacheRead": 55701624,
+      "cost": 198.38580224999987,
+      "allTokens": 60042253
+    },
+    {
+      "project": "-Users-jaydenworkplace-projects-jayden-site",
+      "input": 365,
+      "output": 208972,
+      "cacheWrite": 1677766,
+      "cacheRead": 51538000,
+      "cost": 124.44348749999996,
+      "allTokens": 53425103
+    }
+  ]
+}

@@ -38,10 +38,25 @@ fn claude_projects_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
 }
 
+/// 本地时区今天零点对应的 UTC 时间串(日志时间戳是 UTC ISO,前缀可比较)
+/// 与 dev_today 里 git --since=midnight 的本地口径保持一致
+fn local_today_start_utc() -> String {
+    use chrono::TimeZone;
+    let midnight = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 恒为合法时间");
+    chrono::Local
+        .from_local_datetime(&midnight)
+        .single()
+        .map(|dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%S").to_string())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string())
+}
+
 #[tauri::command]
 fn usage_today() -> Result<UsageToday, String> {
     let root = claude_projects_dir().ok_or("找不到用户目录")?;
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let today_start = local_today_start_utc();
     // 只扫最近 48h 内有写入的文件,今日数据必然在其中
     let cutoff = SystemTime::now() - Duration::from_secs(48 * 3600);
 
@@ -85,7 +100,7 @@ fn usage_today() -> Result<UsageToday, String> {
                     continue;
                 }
                 let ts = v["timestamp"].as_str().unwrap_or("");
-                if !ts.starts_with(&today) {
+                if ts < today_start.as_str() {
                     continue;
                 }
                 let Some(usage) = v["message"]["usage"].as_object() else {

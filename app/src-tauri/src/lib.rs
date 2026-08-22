@@ -452,12 +452,117 @@ async fn ai_daily_summary(data: String) -> Result<String, String> {
         );
         let out = Command::new("claude")
             .args(["-p", &prompt])
+            .stdin(std::process::Stdio::null())
             .output()
             .map_err(|e| format!("调用 claude CLI 失败: {e}"))?;
         if !out.status.success() {
             return Err(format!("claude CLI 返回错误: {}", String::from_utf8_lossy(&out.stderr)));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ============ 参赛模式:赛程规划与赛事问答 ============
+
+/// 调本地 claude CLI(headless),返回原始 stdout。
+/// stdin 必须显式关掉:否则 CLI 会等 3 秒 stdin 再放弃,每次调用白付 3 秒。
+fn run_claude(prompt: &str) -> Result<String, String> {
+    let out = Command::new("claude")
+        .args(["-p", prompt])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("调用 claude CLI 失败(确认已安装 claude 命令): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "claude CLI 返回错误: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// CLI 常把 JSON 裹在 ```json 里或前后带解释,这里剥出纯 JSON
+fn extract_json(s: &str) -> String {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("```json").or_else(|| t.strip_prefix("```")) {
+        if let Some(end) = rest.rfind("```") {
+            return rest[..end].trim().to_string();
+        }
+    }
+    match (t.find('{'), t.rfind('}')) {
+        (Some(a), Some(b)) if b > a => t[a..=b].to_string(),
+        _ => t.to_string(),
+    }
+}
+
+/// 把赛事文档解析成带时间的赛程节点。返回 JSON 字符串,前端自行解析。
+#[tauri::command]
+async fn plan_hackathon(
+    name: String,
+    start: String,
+    end: String,
+    doc: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = chrono::Local::now().to_rfc3339();
+        let doc_part = if doc.trim().is_empty() {
+            "(主办方文档未提供,只依据上面的起止时间做合理推导)".to_string()
+        } else {
+            format!("主办方赛事文档/群公告原文:\n---\n{doc}\n---")
+        };
+        let prompt = format!(
+            "你是黑客松参赛教练。当前时间 {now}。\n\
+             比赛名称: {name}\n比赛开始: {start}\n提交截止: {end}\n\n{doc_part}\n\n\
+             请规划这场比赛的关键时间节点,输出**纯 JSON**,不要 markdown 代码块,不要任何解释文字。\n\
+             格式: {{\"milestones\":[{{\"at\":\"ISO8601带时区\",\"title\":\"节点名\",\"action\":\"这个点选手要做什么(20字内)\",\"critical\":true}}]}}\n\
+             要求:\n\
+             1. at 必须落在比赛开始与提交截止之间(报名/材料准备类节点可早于开始)\n\
+             2. critical=true 只给错过就无法挽回的硬节点(报名截止、提交截止、路演签到)\n\
+             3. 文档里写明的时间必须原样保留,不要自己改;文档没写的才按经验推导\n\
+             4. 6-10 个节点,按时间升序\n\
+             5. action 写具体动作,不要写「继续开发」这种废话"
+        );
+        let raw = run_claude(&prompt)?;
+        let json = extract_json(&raw);
+        serde_json::from_str::<serde_json::Value>(&json).map_err(|e| {
+            format!(
+                "CLI 返回的不是合法 JSON({e})。原始输出前 300 字: {}",
+                raw.chars().take(300).collect::<String>()
+            )
+        })?;
+        Ok(json)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 赛事问答:带上赛事文档作为上下文,回答「赞助商 token 在哪领」这类问题
+#[tauri::command]
+async fn ask_hackathon(
+    question: String,
+    name: String,
+    doc: String,
+    milestones: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let doc_part = if doc.trim().is_empty() {
+            "(选手没有提供主办方文档)".to_string()
+        } else {
+            format!("主办方赛事文档原文:\n---\n{doc}\n---")
+        };
+        let prompt = format!(
+            "你是「{name}」这场黑客松的参赛助手,正在比赛现场帮选手快速答疑。\n\n\
+             {doc_part}\n\n已规划的赛程节点(JSON): {milestones}\n\n\
+             选手的问题: {question}\n\n\
+             回答要求:\n\
+             1. 用中文,3 句话以内,直接给答案和下一步动作\n\
+             2. 文档里有明确写的,直接引用原文里的关键信息(地址、链接、时间、联系人)\n\
+             3. 文档里没写的,明确说「文档里没写」,再给一句最合理的建议(比如去问主办方群里的谁)\n\
+             4. 不要客套话,不要 markdown 标题和加粗,不要复述问题"
+        );
+        run_claude(&prompt)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -872,6 +977,183 @@ async fn request_pair_code(api_key: String, endpoint_base: Option<String>) -> Re
     .map_err(|e| e.to_string())?
 }
 
+// ============ 作品提取:把本地项目变成可提交的参赛作品 ============
+
+/// git remote 可能是 SSH 形式,而小程序端 pairSync 用 isHttpUrl 硬校验,
+/// 非 http(s) 会被判成脏链接直接置空,所以这里统一转成 https。
+fn remote_to_https(url: &str) -> String {
+    let u = url.trim().trim_end_matches(".git");
+    if let Some(rest) = u.strip_prefix("git@") {
+        // git@github.com:owner/repo -> https://github.com/owner/repo
+        if let Some((host, path)) = rest.split_once(':') {
+            return format!("https://{host}/{path}");
+        }
+    }
+    if let Some(rest) = u.strip_prefix("ssh://git@") {
+        return format!("https://{rest}");
+    }
+    u.to_string()
+}
+
+/// 读项目里的关键文件,交给 CLI 提炼成参赛作品字段。
+/// 输出必须凑齐 name + (repo 或 demo),否则小程序端会以 INVALID_WORK 拒收。
+#[tauri::command]
+async fn extract_work(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::Path::new(&path);
+        if !p.is_dir() {
+            return Err("拖进来的不是文件夹".to_string());
+        }
+        let root = git(&path, &["rev-parse", "--show-toplevel"]).unwrap_or_else(|| path.clone());
+        let dir_name = root.rsplit('/').next().unwrap_or("").to_string();
+        let repo = git(&root, &["remote", "get-url", "origin"])
+            .map(|u| remote_to_https(&u))
+            .unwrap_or_default();
+
+        // README 取前 6000 字符够 CLI 判断项目在做什么了
+        let mut readme = String::new();
+        for cand in ["README.md", "readme.md", "README.MD", "README"] {
+            if let Ok(s) = fs::read_to_string(p.join(cand)) {
+                readme = s.chars().take(6000).collect();
+                break;
+            }
+        }
+        let pkg = fs::read_to_string(p.join("package.json"))
+            .map(|s| s.chars().take(1500).collect::<String>())
+            .unwrap_or_default();
+        // 最近 15 条 commit 说明这个项目最近在干什么
+        let commits = git(&root, &["log", "-15", "--format=%s"]).unwrap_or_default();
+
+        if readme.is_empty() && pkg.is_empty() && commits.is_empty() {
+            return Err("这个目录里没有 README / package.json / git 记录,提取不出作品信息".into());
+        }
+
+        let prompt = format!(
+            "你是黑客松作品提交助手。下面是选手本地项目的真实信息,请提炼成参赛作品卡片。\n\n\
+             目录名: {dir_name}\ngit 仓库地址: {}\n\n\
+             README:\n---\n{readme}\n---\n\npackage.json:\n---\n{pkg}\n---\n\n\
+             最近 commit:\n---\n{commits}\n---\n\n\
+             输出**纯 JSON**,不要 markdown 代码块,不要解释文字:\n\
+             {{\"name\":\"作品名(80字内)\",\"summary\":\"一句话讲清做了什么、解决什么问题(150字内)\",\
+             \"repo\":\"仓库 http(s) 链接,没有就空字符串\",\"demo\":\"在线 demo http(s) 链接,README 里找不到就空字符串\",\
+             \"techStack\":[\"技术栈\",\"最多6个\"],\"cover\":\"\"}}\n\
+             要求:\n\
+             1. name 必须有,不要直接用目录名,要像个作品名\n\
+             2. summary 写实际做的东西,不要写「一个基于 React 的项目」这种空话\n\
+             3. repo 和 demo 必须是 http:// 或 https:// 开头,拿不准就留空字符串,不要编造链接\n\
+             4. techStack 从 package.json 依赖和 README 里提取真实用到的",
+            if repo.is_empty() { "(无 git remote)" } else { &repo }
+        );
+        let raw = run_claude(&prompt)?;
+        let json = extract_json(&raw);
+        let mut v: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+            format!(
+                "CLI 返回的不是合法 JSON({e})。原始输出前 300 字: {}",
+                raw.chars().take(300).collect::<String>()
+            )
+        })?;
+        // CLI 可能漏掉或编造 repo,本地 git remote 是更可靠的事实来源
+        if !repo.is_empty() {
+            v["repo"] = serde_json::Value::String(repo);
+        }
+        v["localPath"] = serde_json::Value::String(root);
+        Ok(v.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 把作品推到小程序待审核区。
+///
+/// 走的是 pairSync 云函数的 HTTP 触发器,和 hackertrip-cli publish-work 同一条链路:
+/// 配对码由选手在小程序「我的 → Skills 同步」生成(6 位),x-sync-token 是配对时给的 uploadToken。
+/// 注意这和 request_pair_code 拿到的网站账号绑定码不是一回事,两者不能混用。
+#[tauri::command]
+async fn push_work(
+    sync_url: String,
+    sync_token: String,
+    pair_code: String,
+    work: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let url = sync_url.trim().to_string();
+        let token = sync_token.trim().to_string();
+        let code = pair_code.trim().to_string();
+        if url.is_empty() {
+            return Err("缺少 pairSync 触发器地址(在设置里填 HACKERTRIP_SYNC_URL)".into());
+        }
+        if token.is_empty() {
+            return Err("缺少同步密钥(在设置里填 HACKERTRIP_SYNC_TOKEN)".into());
+        }
+        if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+            return Err("配对码必须是 6 位数字,在小程序「我的 → Skills 同步」生成".into());
+        }
+        let w: serde_json::Value =
+            serde_json::from_str(&work).map_err(|e| format!("作品数据不是合法 JSON: {e}"))?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let payload = serde_json::json!({
+            "action": "push",
+            "pairCode": code,
+            "scan": {
+                "source": "hackertrip-desktop",
+                "syncedAt": now,
+                "project": {
+                    "name": w["name"],
+                    "summary": w["summary"],
+                    "description": w["summary"],
+                    "techStack": w["techStack"],
+                    "keywords": [],
+                },
+            },
+            "works": [w],
+        });
+        match ureq::post(&url)
+            .header("x-sync-token", &token)
+            .send_json(payload)
+        {
+            Ok(mut r) => {
+                let text = r.body_mut().read_to_string().map_err(|e| e.to_string())?;
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|_| format!("服务端响应异常: {text}"))?;
+                if v["ok"].as_bool() == Some(true) {
+                    Ok("已上传,去小程序「我的 → 作品」确认发布".to_string())
+                } else {
+                    Err(v["message"]
+                        .as_str()
+                        .unwrap_or("服务端拒绝了这次提交")
+                        .to_string())
+                }
+            }
+            Err(ureq::Error::StatusCode(c)) => Err(format!("服务端返回 {c}(检查触发器地址与密钥)")),
+            Err(e) => Err(format!("网络请求失败: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 读 vibe-usage daemon 落在本地的额度快照(~/.vibe-usage/*-rate-limits.json)。
+/// 没装 vibe-usage 时返回空对象,前端自己降级。
+#[tauri::command]
+fn rate_limits() -> HashMap<String, serde_json::Value> {
+    let mut m = HashMap::new();
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return m;
+    };
+    let dir = home.join(".vibe-usage");
+    for (key, file) in [
+        ("claude", "claude-rate-limits.json"),
+        ("codex", "codex-rate-limits.json"),
+    ] {
+        if let Ok(s) = fs::read_to_string(dir.join(file)) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                m.insert(key.to_string(), v);
+            }
+        }
+    }
+    m
+}
+
 /// 供前端记录/读取轻量状态(比赛配置、清单勾选等存 localStorage,这里暂不需要)
 #[tauri::command]
 fn app_meta() -> HashMap<String, String> {
@@ -891,6 +1173,11 @@ pub fn run() {
             agent_status,
             dev_today,
             ai_daily_summary,
+            plan_hackathon,
+            ask_hackathon,
+            extract_work,
+            push_work,
+            rate_limits,
             profile_stats,
             sync_profile,
             github_login,

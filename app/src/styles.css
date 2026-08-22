@@ -485,3 +485,87 @@ body {
 .form-row input:focus {
   border-color: rgba(139, 79, 232, 0.6);
 }
+
+/* ---------- 赛程节点 ---------- */
+#h-milestones-title .link {
+  float: right;
+  font-weight: 400;
+}
+.ms-item {
+  gap: 8px;
+}
+.ms-item.past {
+  opacity: 0.45;
+}
+.ms-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.35);
+  flex: none;
+}
+.ms-dot.critical {
+  background: #ff6b6b;
+  box-shadow: 0 0 8px rgba(255, 107, 107, 0.6);
+}
+.ms-dot.past {
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: none;
+}
+.ms-time {
+  min-width: 78px;
+  flex: none;
+}
+.ms-action {
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* ---------- 交作品 ---------- */
+.submit-block {
+  margin-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 4px;
+}
+.toggle-head {
+  cursor: pointer;
+}
+.dropzone {
+  margin: 6px 0;
+  padding: 18px 12px;
+  text-align: center;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.dropzone.hover {
+  border-color: #7c5dff;
+  background: rgba(124, 93, 255, 0.12);
+}
+.dropzone .sub {
+  margin-top: 4px;
+}
+textarea {
+  width: 100%;
+  resize: vertical;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #ededed;
+  font: inherit;
+  font-size: 12px;
+  padding: 7px 9px;
+  outline: none;
+}
+textarea:focus {
+  border-color: rgba(124, 93, 255, 0.6);
+}
+.action.ghost {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ededed;
+}

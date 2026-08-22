@@ -67,6 +67,13 @@
           <input id="s-apikey" type="password" placeholder="也可手动粘贴 API Key(ht_live_ 开头)" />
           <button class="action" id="s-savekey">保存</button>
         </div>
+        <div class="form-row">
+          <input id="s-syncurl" type="text" placeholder="pairSync 触发器地址(交作品用)" />
+        </div>
+        <div class="form-row">
+          <input id="s-synctoken" type="password" placeholder="同步密钥 uploadToken(交作品用)" />
+          <button class="action" id="s-savesync">保存</button>
+        </div>
         <div class="row">
           <span class="label">同步内容</span>
           <span class="spacer"></span>
@@ -121,7 +128,15 @@
             <input id="ev-end" type="datetime-local" />
           </div>
           <div class="form-row">
+            <textarea
+              id="ev-doc"
+              rows="3"
+              placeholder="粘贴主办方赛事文档 / 群公告(可选)。贴了就能自动排出赛程节点、并在比赛中随时问它细节"
+            ></textarea>
+          </div>
+          <div class="form-row">
             <button class="action" id="ev-save">开始比赛</button>
+            <span class="sub" id="ev-plan-hint"></span>
           </div>
         </div>
 
@@ -137,6 +152,71 @@
               <div class="phases" id="h-phases"></div>
             </div>
           </div>
+
+          <!-- 赛程节点(由主办方文档解析而来) -->
+          <div class="section-title" id="h-milestones-title">
+            赛程节点
+            <span class="sub link" id="h-replan">重新规划</span>
+          </div>
+          <div id="h-milestones"></div>
+
+          <!-- 交作品:内嵌 toggle,不另开窗口 -->
+          <div class="submit-block">
+            <div class="row toggle-head" id="work-toggle">
+              <span class="icon" style="background: rgba(124, 93, 255, 0.22)">⇪</span>
+              <span class="label strong">交作品</span>
+              <span class="sub" id="work-hint">把项目文件夹拖进来自动提取</span>
+              <span class="spacer"></span>
+              <span class="chev-sm" id="work-chev">›</span>
+            </div>
+            <div id="work-body" class="hidden">
+              <div id="work-drop" class="dropzone">
+                把项目文件夹拖到这里
+                <div class="sub">读 README / package.json / git 记录,交给本地 CLI 提炼</div>
+              </div>
+              <div id="work-form" class="hidden">
+                <div class="form-row">
+                  <input id="w-name" type="text" placeholder="作品名(必填)" />
+                </div>
+                <div class="form-row">
+                  <textarea id="w-summary" rows="2" placeholder="一句话讲清做了什么、解决什么问题"></textarea>
+                </div>
+                <div class="form-row">
+                  <input id="w-repo" type="text" placeholder="仓库链接 https://" />
+                </div>
+                <div class="form-row">
+                  <input id="w-demo" type="text" placeholder="在线 demo 链接 https://" />
+                </div>
+                <div class="form-row">
+                  <input id="w-stack" type="text" placeholder="技术栈,逗号分隔" />
+                </div>
+                <div class="form-row">
+                  <input id="w-paircode" type="text" maxlength="6" placeholder="配对码 6 位" style="max-width: 110px" />
+                  <span class="sub">小程序「我的 → Skills 同步」生成</span>
+                </div>
+                <div class="form-row">
+                  <button class="action" id="w-submit">提交到 HackerTrip</button>
+                  <span class="sub link" id="w-redo">重新提取</span>
+                  <span class="spacer"></span>
+                  <span class="sub" id="w-status"></span>
+                </div>
+                <div class="form-row hidden" id="w-xhs-row">
+                  <button class="action ghost" id="w-xhs">生成小红书文案</button>
+                  <span class="sub">生成后复制并唤起小红书</span>
+                </div>
+                <div id="w-xhs-out" class="summary hidden"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 赛事问答:只在参赛模式出现 -->
+          <div class="section-title">问一下</div>
+          <div class="form-row">
+            <input id="h-ask" type="text" placeholder="赞助商 token 在哪领?作品交到哪?" />
+            <button class="action ghost" id="h-ask-go">问</button>
+          </div>
+          <div id="h-ask-out" class="summary hidden"></div>
+
           <div class="row">
             <span class="icon" style="background: rgba(255, 255, 255, 0.08)">✳</span>
             <span class="label">本场 Agent 用量</span>

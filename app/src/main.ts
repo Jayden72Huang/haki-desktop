@@ -46,10 +46,27 @@ interface RepoToday {
   last_commit_min: number | null;
   last_message: string;
 }
+interface Milestone {
+  at: string; // ISO
+  title: string;
+  action: string;
+  critical: boolean;
+}
 interface HackEvent {
   name: string;
   start: string; // ISO
   end: string; // ISO
+  doc?: string; // 主办方文档原文,问答时作为上下文
+  milestones?: Milestone[];
+}
+interface WorkDraft {
+  name: string;
+  summary: string;
+  repo: string;
+  demo: string;
+  techStack: string[];
+  cover?: string;
+  localPath?: string;
 }
 
 type Mode = "daily" | "hackathon";
@@ -92,6 +109,10 @@ let repos: RepoToday[] = [];
 let event = store.get<HackEvent | null>("event", null);
 let showSettings = false;
 const openRows = new Set<string>();
+let workOpen = false;
+let workDraft: WorkDraft | null = null;
+/// 已经弹过提醒的节点(按 at 去重),避免每秒 tick 重复通知
+const notifiedMilestones = new Set<string>(store.get<string[]>("notified_ms", []));
 
 const PHASES = [
   { name: "立项", ratio: 0.15 },
@@ -338,6 +359,11 @@ async function ensureNotifyPermission(): Promise<boolean> {
   return (await requestPermission()) === "granted";
 }
 
+async function notify(title: string, body: string) {
+  if (!(await ensureNotifyPermission())) return;
+  sendNotification({ title, body });
+}
+
 async function nightlyCheck() {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
@@ -365,6 +391,70 @@ function countdownText(): string | null {
   return `${p(h)}:${p(m)}:${p(s)}`;
 }
 
+/// 下一个还没到的节点
+function nextMilestone(): Milestone | null {
+  const list = event?.milestones ?? [];
+  const now = Date.now();
+  for (const m of list) {
+    const t = new Date(m.at).getTime();
+    if (!Number.isNaN(t) && t > now) return m;
+  }
+  return null;
+}
+
+/// 节点到点提醒:critical 节点提前 30 分钟提醒,普通节点到点提醒
+function checkMilestoneAlerts() {
+  if (!event?.milestones) return;
+  const now = Date.now();
+  for (const m of event.milestones) {
+    const t = new Date(m.at).getTime();
+    if (Number.isNaN(t)) continue;
+    const lead = m.critical ? 30 * 60_000 : 0;
+    const fireAt = t - lead;
+    // 只在刚跨过触发点的 2 分钟窗口内提醒,避免开机就把过期节点全弹一遍
+    if (now >= fireAt && now - fireAt < 2 * 60_000 && !notifiedMilestones.has(m.at)) {
+      notifiedMilestones.add(m.at);
+      store.set("notified_ms", [...notifiedMilestones]);
+      void notify(
+        m.critical ? `⚠️ ${m.title}` : m.title,
+        lead > 0 ? `30 分钟后截止 · ${m.action}` : m.action
+      );
+    }
+  }
+}
+
+function renderMilestones() {
+  const list = event?.milestones ?? [];
+  const box = $("h-milestones");
+  if (!list.length) {
+    box.innerHTML = `<div class="row"><span class="sub">还没有赛程节点。点右上「重新规划」,贴上主办方文档让本地 CLI 排一份。</span></div>`;
+    return;
+  }
+  const now = Date.now();
+  box.innerHTML = list
+    .map((m) => {
+      const t = new Date(m.at).getTime();
+      const past = !Number.isNaN(t) && t <= now;
+      const time = Number.isNaN(t)
+        ? m.at
+        : new Date(t).toLocaleString("zh-CN", {
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+      return `
+      <div class="row ms-item ${past ? "past" : ""}">
+        <span class="ms-dot ${m.critical ? "critical" : ""} ${past ? "past" : ""}"></span>
+        <span class="ms-time mono sub">${esc(time)}</span>
+        <span class="label ${past ? "strike" : ""}">${esc(m.title)}</span>
+        <span class="spacer"></span>
+        <span class="sub ms-action">${esc(m.action)}</span>
+      </div>`;
+    })
+    .join("");
+}
+
 function renderHackathon() {
   const hasEvent = !!event;
   $("event-form").classList.toggle("hidden", hasEvent);
@@ -372,7 +462,12 @@ function renderHackathon() {
   if (!event) return;
 
   $("h-countdown").textContent = countdownText() ?? "已截止";
+  // 倒计时旁边跟一句「下一个节点是什么」,比只有截止时间更有指导性
+  const nm = nextMilestone();
+  const sub = $("h-countdown").nextElementSibling;
+  if (sub) sub.textContent = nm ? `距提交截止 · 下一步:${nm.title}` : "距作品提交截止";
   $("h-tokens").textContent = usage ? `${fmt(usage.all)} tokens · ${usage.sessions} 会话` : "—";
+  renderMilestones();
 
   // 阶段进度
   const start = new Date(event.start).getTime();
@@ -423,15 +518,213 @@ function renderChecklist() {
   });
 }
 
-function saveEvent() {
+async function saveEvent() {
   const name = ($("ev-name") as HTMLInputElement).value.trim();
   const start = ($("ev-start") as HTMLInputElement).value;
   const end = ($("ev-end") as HTMLInputElement).value;
+  const doc = ($("ev-doc") as HTMLTextAreaElement)?.value.trim() ?? "";
   if (!name || !end) return;
-  event = { name, start: start || new Date().toISOString(), end };
+  event = { name, start: start || new Date().toISOString(), end, doc };
   store.set("event", event);
   store.set("checklist", DEFAULT_CHECKLIST.map(() => false));
+  notifiedMilestones.clear();
+  store.set("notified_ms", []);
   render();
+  await planMilestones();
+}
+
+/* ---------- 赛事问答 ---------- */
+async function askHackathon() {
+  if (!event) return;
+  const input = $("h-ask") as HTMLInputElement;
+  const q = input.value.trim();
+  if (!q) return;
+  const out = $("h-ask-out");
+  out.classList.remove("hidden");
+  out.textContent = "本地 CLI 思考中…";
+  await fitWindow();
+  try {
+    const ans = await invoke<string>("ask_hackathon", {
+      question: q,
+      name: event.name,
+      doc: event.doc ?? "",
+      milestones: JSON.stringify(event.milestones ?? []),
+    });
+    out.textContent = ans;
+    input.value = "";
+  } catch (e) {
+    out.textContent = `问失败:${String(e).slice(0, 160)}`;
+  }
+  await fitWindow();
+}
+
+/* ---------- 交作品 ---------- */
+/// Tauri 的拖放事件走窗口级 API,HTML5 的 drop 事件在 webview 里拿不到真实路径
+async function setupWorkDrop() {
+  await getCurrentWindow().onDragDropEvent(async (e) => {
+    if (e.payload.type === "over") {
+      $("work-drop").classList.add("hover");
+      return;
+    }
+    if (e.payload.type === "leave") {
+      $("work-drop").classList.remove("hover");
+      return;
+    }
+    if (e.payload.type !== "drop") return;
+    $("work-drop").classList.remove("hover");
+    const p = e.payload.paths?.[0];
+    if (!p) return;
+    // 拖进来时如果面板没展开到交作品,自动帮他打开
+    if (!workOpen) {
+      workOpen = true;
+      $("work-body").classList.remove("hidden");
+      $("work-chev").textContent = "⌄";
+    }
+    await extractWork(p);
+  });
+}
+
+async function extractWork(path: string) {
+  const drop = $("work-drop");
+  drop.classList.remove("hidden");
+  drop.innerHTML = `正在读项目并交给本地 CLI 提炼…<div class="sub">${esc(path)}</div>`;
+  await fitWindow();
+  try {
+    const raw = await invoke<string>("extract_work", { path });
+    const w = JSON.parse(raw) as WorkDraft;
+    workDraft = w;
+    ($("w-name") as HTMLInputElement).value = w.name ?? "";
+    ($("w-summary") as HTMLTextAreaElement).value = w.summary ?? "";
+    ($("w-repo") as HTMLInputElement).value = w.repo ?? "";
+    ($("w-demo") as HTMLInputElement).value = w.demo ?? "";
+    ($("w-stack") as HTMLInputElement).value = (w.techStack ?? []).join(", ");
+    drop.classList.add("hidden");
+    $("work-form").classList.remove("hidden");
+    $("w-status").textContent = "确认无误后提交";
+  } catch (e) {
+    drop.innerHTML = `提取失败:${esc(String(e).slice(0, 140))}<div class="sub">换个目录再拖一次</div>`;
+  }
+  await fitWindow();
+}
+
+/// 提交前按小程序端 pairSync 的硬校验先拦一道,省得白跑一趟网络
+function validateWork(w: WorkDraft): string | null {
+  if (!w.name.trim()) return "作品名必填";
+  const okUrl = (u: string) => /^https?:\/\//i.test(u.trim());
+  if (!okUrl(w.repo) && !okUrl(w.demo)) return "仓库和 demo 至少要有一个 http(s) 链接";
+  return null;
+}
+
+async function submitWork() {
+  const w: WorkDraft = {
+    name: ($("w-name") as HTMLInputElement).value.trim(),
+    summary: ($("w-summary") as HTMLTextAreaElement).value.trim(),
+    repo: ($("w-repo") as HTMLInputElement).value.trim(),
+    demo: ($("w-demo") as HTMLInputElement).value.trim(),
+    techStack: ($("w-stack") as HTMLInputElement).value
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 6),
+    cover: "",
+  };
+  const err = validateWork(w);
+  const status = $("w-status");
+  if (err) {
+    status.textContent = err;
+    return;
+  }
+  workDraft = w;
+  const code = ($("w-paircode") as HTMLInputElement).value.trim();
+  const syncUrl = store.get<string>("syncUrl", "");
+  const syncToken = store.get<string>("syncToken", "");
+  if (!syncUrl || !syncToken) {
+    status.textContent = "先去设置里填 pairSync 触发器地址和同步密钥";
+    return;
+  }
+  status.textContent = "上传中…";
+  try {
+    // 和 hackertrip-cli publish-work 同一条链路,作品落到待审核区
+    const msg = await invoke<string>("push_work", {
+      syncUrl,
+      syncToken,
+      pairCode: code,
+      work: JSON.stringify({ ...w, awards: "" }),
+    });
+    status.textContent = msg;
+    $("w-xhs-row").classList.remove("hidden");
+    await notify("作品已上传", "去小程序「我的 → 作品」确认发布");
+  } catch (e) {
+    status.textContent = `提交失败:${String(e).slice(0, 140)}`;
+  }
+  await fitWindow();
+}
+
+/// 小红书没有第三方发布 API,这里只做文案生成 + 唤起,最后一步选手手动粘贴
+async function genXhsCopy() {
+  if (!workDraft) return;
+  const out = $("w-xhs-out");
+  out.classList.remove("hidden");
+  out.textContent = "生成中…";
+  await fitWindow();
+  try {
+    const text = await invoke<string>("ask_hackathon", {
+      question:
+        `帮我给这个黑客松作品写一条小红书笔记。作品名:${workDraft.name};` +
+        `做了什么:${workDraft.summary};技术栈:${(workDraft.techStack ?? []).join("/")}。` +
+        `要求:标题 20 字以内带钩子,正文 300 字以内分点讲清做了什么和踩了什么坑,结尾 5 个话题标签。` +
+        `直接输出标题和正文,不要解释。`,
+      name: event?.name ?? "黑客松",
+      doc: event?.doc ?? "",
+      milestones: "[]",
+    });
+    out.textContent = text;
+    await navigator.clipboard.writeText(text).catch(() => {});
+    const tip = document.createElement("div");
+    tip.className = "sub";
+    tip.textContent = "已复制到剪贴板,点这里唤起小红书粘贴";
+    tip.style.cursor = "pointer";
+    tip.addEventListener("click", () => void openUrl("https://creator.xiaohongshu.com/publish/publish"));
+    out.appendChild(tip);
+  } catch (e) {
+    out.textContent = `生成失败:${String(e).slice(0, 140)}`;
+  }
+  await fitWindow();
+}
+
+/// 调本地 CLI 把赛事文档排成赛程节点
+async function planMilestones() {
+  if (!event) return;
+  const hint = $("ev-plan-hint");
+  const title = $("h-milestones-title");
+  const busy = "正在让本地 CLI 排赛程…";
+  hint.textContent = busy;
+  $("h-milestones").innerHTML = `<div class="row"><span class="sub">${busy}</span></div>`;
+  try {
+    const raw = await invoke<string>("plan_hackathon", {
+      name: event.name,
+      start: event.start,
+      end: event.end,
+      doc: event.doc ?? "",
+    });
+    const parsed = JSON.parse(raw) as { milestones?: Milestone[] };
+    const list = (parsed.milestones ?? [])
+      .filter((m) => m && m.at && m.title)
+      .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+    if (!list.length) throw new Error("CLI 没有排出任何节点");
+    event.milestones = list;
+    store.set("event", event);
+    hint.textContent = "";
+    if (title) title.classList.remove("err");
+    render();
+  } catch (e) {
+    const msg = String(e);
+    hint.textContent = "";
+    $("h-milestones").innerHTML = `<div class="row"><span class="sub">排赛程失败:${esc(
+      msg.slice(0, 120)
+    )}</span></div>`;
+    console.error(e);
+  }
 }
 
 /* ---------- 账号绑定 ---------- */
@@ -563,6 +856,14 @@ window.addEventListener("DOMContentLoaded", () => {
     updateLoginStatus(); // 绑定状态行显示结果,同步行保留上次同步时间
     updateSyncStatus();
   });
+  ($("s-syncurl") as HTMLInputElement).value = store.get<string>("syncUrl", "");
+  ($("s-synctoken") as HTMLInputElement).value = store.get<string>("syncToken", "");
+  $("s-savesync").addEventListener("click", () => {
+    store.set("syncUrl", ($("s-syncurl") as HTMLInputElement).value.trim());
+    store.set("syncToken", ($("s-synctoken") as HTMLInputElement).value.trim());
+    ($("s-savesync") as HTMLButtonElement).textContent = "已保存";
+    setTimeout(() => (($("s-savesync") as HTMLButtonElement).textContent = "保存"), 1500);
+  });
   $("s-login").addEventListener("click", () => void githubLogin());
   $("s-paircode").addEventListener("click", () => void showPairCode());
   $("s-sync").addEventListener("click", () => void syncNow(false));
@@ -574,12 +875,34 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   $("summary-btn").addEventListener("click", () => void generateSummary());
-  $("ev-save").addEventListener("click", saveEvent);
+  $("ev-save").addEventListener("click", () => void saveEvent());
+  $("h-replan").addEventListener("click", () => void planMilestones());
+  $("h-ask-go").addEventListener("click", () => void askHackathon());
+  $("h-ask").addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") void askHackathon();
+  });
+  $("work-toggle").addEventListener("click", () => {
+    workOpen = !workOpen;
+    $("work-body").classList.toggle("hidden", !workOpen);
+    $("work-chev").textContent = workOpen ? "⌄" : "›";
+    void fitWindow();
+  });
+  $("w-submit").addEventListener("click", () => void submitWork());
+  $("w-redo").addEventListener("click", () => {
+    workDraft = null;
+    $("work-form").classList.add("hidden");
+    $("work-drop").classList.remove("hidden");
+    $("w-status").textContent = "";
+    void fitWindow();
+  });
+  $("w-xhs").addEventListener("click", () => void genXhsCopy());
+  void setupWorkDrop();
   $("ev-edit").addEventListener("click", () => {
     if (!event) return;
     ($("ev-name") as HTMLInputElement).value = event.name;
     ($("ev-start") as HTMLInputElement).value = event.start.slice(0, 16);
     ($("ev-end") as HTMLInputElement).value = event.end.slice(0, 16);
+    ($("ev-doc") as HTMLTextAreaElement).value = event.doc ?? "";
     event = null;
     render();
   });
@@ -601,4 +924,5 @@ window.addEventListener("DOMContentLoaded", () => {
     if (mode === "hackathon" && event) renderPill();
     if (expanded && mode === "hackathon" && event) $("h-countdown").textContent = countdownText() ?? "已截止";
   }, 1000); // 倒计时每秒走
+  setInterval(() => checkMilestoneAlerts(), 30_000); // 赛程节点提醒
 });

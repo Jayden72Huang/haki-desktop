@@ -184,9 +184,164 @@ fn encode_project_dir(cwd: &str) -> String {
         .collect()
 }
 
+fn codex_home() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+}
+
+/// codex 会往对话里以 role=user 注入一堆系统内容(插件清单、AGENTS.md、历史回放),
+/// 直接拿来当「任务」会显示成一坨配置文本,这里按开头特征剔掉。
+const CODEX_NOISE_PREFIXES: &[&str] = &[
+    "the following is the codex agent history",
+    "# agents.md instructions",
+    "<",
+    "you are codex",
+    "recommended_plugins",
+];
+
+/// 取会话的首条真实用户指令。
+///
+/// 取首条而不是末条:首条是这个会话被派去做什么(任务概述),末条往往是
+/// 中途的追问或系统回放,单独看不知所云。只扫开头 400 行,足够越过注入内容。
+fn codex_first_user_msg(path: &std::path::Path) -> Option<String> {
+    let f = fs::File::open(path).ok()?;
+    for line in BufReader::new(f).lines().map_while(Result::ok).take(400) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let payload = &v["payload"];
+        let t = if v["type"] == "response_item" && payload["role"] == "user" {
+            payload["content"]
+                .as_array()
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|i| i["type"] == "input_text" || i["type"] == "text")
+                })
+                .and_then(|i| i["text"].as_str())
+                .unwrap_or("")
+        } else if v["type"] == "event_msg" && payload["type"] == "user_message" {
+            payload["message"].as_str().unwrap_or("")
+        } else {
+            continue;
+        };
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let low = t.to_lowercase();
+        if CODEX_NOISE_PREFIXES.iter().any(|p| low.starts_with(p)) {
+            continue;
+        }
+        // 多行指令只取首行,session 条是单行展示
+        let first_line = t.lines().find(|l| !l.trim().is_empty())?.trim();
+        return Some(first_line.chars().take(180).collect());
+    }
+    None
+}
+
+/// codex 的会话记录不在 ~/.claude 下,所以之前 codex 那几行状态永远是空的。
+///
+/// rollout 文件首行就是 session_meta,里面带 cwd,所以只读首行就能判断这个会话
+/// 属于哪个目录 —— 1000+ 个历史会话全读一遍是不可接受的。任务概述优先取
+/// session_index.jsonl 里的 thread_name,没有再回退到首条用户指令。
+fn codex_status(cwd: &str) -> Result<AgentStatus, String> {
+    let home = codex_home().ok_or("找不到 CODEX_HOME")?;
+    let sessions = home.join("sessions");
+
+    // 收集 rollout 文件 + mtime。目录层级是 sessions/YYYY/MM/DD/
+    let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
+    let mut stack = vec![sessions];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "jsonl") {
+                let m = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                files.push((p, m));
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err("没有 codex 会话记录".into());
+    }
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // 只在最近 300 个会话里找,再旧的即使匹配也不是「当前正在跑的那个」
+    let mut hit: Option<(String, SystemTime, PathBuf)> = None;
+    for (path, mtime) in files.iter().take(300) {
+        let Ok(f) = fs::File::open(path) else { continue };
+        let mut first = String::new();
+        if BufReader::new(f).read_line(&mut first).is_err() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&first) else {
+            continue;
+        };
+        if v["type"] != "session_meta" {
+            continue;
+        }
+        if v["payload"]["cwd"].as_str() != Some(cwd) {
+            continue;
+        }
+        let sid = v["payload"]["session_id"]
+            .as_str()
+            .or_else(|| v["payload"]["id"].as_str())
+            .unwrap_or("")
+            .to_string();
+        hit = Some((sid, *mtime, path.clone()));
+        break;
+    }
+    let (sid, mtime, path) = hit.ok_or("该目录暂无 codex 会话记录")?;
+
+    let idle_secs = SystemTime::now()
+        .duration_since(mtime)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // codex 的会话标题就是最贴切的「当前任务」
+    let mut last_task = String::new();
+    if !sid.is_empty() {
+        if let Ok(f) = fs::File::open(home.join("session_index.jsonl")) {
+            for line in BufReader::new(f).lines().map_while(Result::ok) {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if v["id"].as_str() == Some(sid.as_str()) {
+                    last_task = v["thread_name"].as_str().unwrap_or("").to_string();
+                    break;
+                }
+            }
+        }
+    }
+
+    // 正在跑的会话往往还没有 thread_name(codex 是事后才给会话起标题的),
+    // 而那恰恰是最需要显示任务的行,所以回退到最后一条真实用户指令。
+    if last_task.trim().is_empty() {
+        last_task = codex_first_user_msg(&path).unwrap_or_default();
+    }
+
+    // codex 没有 claude 那种「等确认」的显式标记,只按空闲时长判活跃
+    let status = if idle_secs < 20 { "running" } else { "done" };
+    Ok(AgentStatus {
+        status: status.to_string(),
+        last_task,
+        last_ts: String::new(),
+    })
+}
+
 #[tauri::command]
-fn agent_status(cwd: String) -> Result<AgentStatus, String> {
+fn agent_status(cwd: String, agent: Option<String>) -> Result<AgentStatus, String> {
     use std::io::{Read, Seek, SeekFrom};
+
+    if agent.as_deref() == Some("codex") {
+        return codex_status(&cwd);
+    }
 
     let root = claude_projects_dir().ok_or("找不到用户目录")?;
     let dir = root.join(encode_project_dir(&cwd));
@@ -295,6 +450,52 @@ pub struct AgentProc {
     pub pid: u32,
     pub cwd: Option<String>,
     pub project: Option<String>,
+    /// 当前分支,detached HEAD 或非 git 目录为 None
+    pub branch: Option<String>,
+    /// 未提交的改动文件数(含未跟踪)
+    pub dirty_files: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+/// 一个目录的 git 概况。`status --porcelain -b` 一次同时给出分支和改动文件,
+/// 比分开调 rev-parse + status 少一次进程启动。
+fn git_snapshot(path: &str) -> (Option<String>, u32, u32, u32) {
+    let Some(status) = git(path, &["status", "--porcelain=v1", "-b"]) else {
+        return (None, 0, 0, 0);
+    };
+    let mut branch = None;
+    let mut dirty = 0u32;
+    for (i, line) in status.lines().enumerate() {
+        if i == 0 && line.starts_with("##") {
+            // "## main...origin/main [ahead 1]" -> "main";"## HEAD (no branch)" -> None
+            let b = line.trim_start_matches("##").trim();
+            let b = b.split("...").next().unwrap_or(b).trim();
+            if !b.is_empty() && !b.contains("(no branch)") {
+                branch = Some(b.to_string());
+            }
+            continue;
+        }
+        if !line.trim().is_empty() {
+            dirty += 1;
+        }
+    }
+    // 行级增删只看已跟踪文件,未跟踪文件没有 diff 可言
+    let (ins, del) = git(path, &["diff", "--numstat", "HEAD"])
+        .map(|out| {
+            let mut i = 0u32;
+            let mut d = 0u32;
+            for line in out.lines() {
+                let mut it = line.split('\t');
+                if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                    i += a.parse::<u32>().unwrap_or(0);
+                    d += b.parse::<u32>().unwrap_or(0);
+                }
+            }
+            (i, d)
+        })
+        .unwrap_or((0, 0));
+    (branch, dirty, ins, del)
 }
 
 const AGENT_BINS: &[&str] = &["claude", "codex", "aider", "gemini", "opencode", "amp", "goose"];
@@ -363,11 +564,17 @@ fn running_agents() -> Result<Vec<AgentProc>, String> {
         if !dedupe.insert(key) {
             continue; // 同一 agent 在同一目录的多个进程只记一条
         }
+        let (branch, dirty_files, insertions, deletions) =
+            cwd.as_deref().map(git_snapshot).unwrap_or((None, 0, 0, 0));
         found.push(AgentProc {
             agent: agent.to_string(),
             pid,
             cwd,
             project,
+            branch,
+            dirty_files,
+            insertions,
+            deletions,
         });
     }
     Ok(found)

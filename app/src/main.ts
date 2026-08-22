@@ -32,7 +32,27 @@ interface AgentProc {
   pid: number;
   cwd: string | null;
   project: string | null;
+  branch: string | null;
+  dirty_files: number;
+  insertions: number;
+  deletions: number;
 }
+/// session 条上可开关的字段,顺序即设置里的展示顺序
+type FieldKey = "task" | "folder" | "branch" | "diff" | "usage";
+const FIELD_LABELS: Record<FieldKey, string> = {
+  task: "任务概述",
+  folder: "所在文件夹",
+  branch: "分支",
+  diff: "改动",
+  usage: "耗时 · tokens",
+};
+const DEFAULT_FIELDS: Record<FieldKey, boolean> = {
+  task: true,
+  folder: true,
+  branch: true,
+  diff: true,
+  usage: true,
+};
 interface AgentStatus {
   status: "running" | "needs_input" | "done";
   last_task: string;
@@ -109,6 +129,7 @@ let repos: RepoToday[] = [];
 let event = store.get<HackEvent | null>("event", null);
 let showSettings = false;
 const openRows = new Set<string>();
+let fields = { ...DEFAULT_FIELDS, ...store.get<Partial<Record<FieldKey, boolean>>>("fields", {}) };
 let workOpen = false;
 let workDraft: WorkDraft | null = null;
 /// 已经弹过提醒的节点(按 at 去重),避免每秒 tick 重复通知
@@ -143,12 +164,16 @@ async function refreshAgents() {
   try {
     agents = await invoke<AgentProc[]>("running_agents");
     const statuses: Record<string, AgentStatus> = {};
+    // 以前这里只查 claude,codex 那几行的任务概述才会一直空着
     await Promise.all(
       agents
-        .filter((a) => a.agent === "claude" && a.cwd)
+        .filter((a) => a.cwd)
         .map(async (a) => {
           try {
-            statuses[a.cwd!] = await invoke<AgentStatus>("agent_status", { cwd: a.cwd });
+            statuses[a.cwd!] = await invoke<AgentStatus>("agent_status", {
+              cwd: a.cwd,
+              agent: a.agent,
+            });
           } catch {
             /* 该目录没有会话记录,忽略 */
           }
@@ -159,6 +184,53 @@ async function refreshAgents() {
     console.error(e);
   }
   render();
+}
+
+/* ---------- 设置:字段开关 ---------- */
+function renderFieldToggles() {
+  const box = document.getElementById("field-toggles");
+  if (!box) return;
+  box.innerHTML = (Object.keys(FIELD_LABELS) as FieldKey[])
+    .map(
+      (k) => `
+      <div class="row check-item field-toggle" data-k="${k}">
+        <span class="icon ${fields[k] ? "check" : "dots"}">${fields[k] ? "✓" : "⠿"}</span>
+        <span class="label ${fields[k] ? "" : "strike"}">${FIELD_LABELS[k]}</span>
+      </div>`
+    )
+    .join("");
+  box.querySelectorAll<HTMLElement>(".field-toggle").forEach((el) => {
+    el.addEventListener("click", () => {
+      const k = el.dataset.k as FieldKey;
+      fields[k] = !fields[k];
+      store.set("fields", fields);
+      renderFieldToggles();
+      render();
+    });
+  });
+}
+
+/* ---------- agent logo ---------- */
+/// 用图标代替 CLI 名字。未知 agent 退回首字母,不至于空一块。
+function agentLogo(agent: string): string {
+  switch (agent) {
+    case "claude":
+      // Anthropic 的星芒
+      return `<svg class="agent-logo" viewBox="0 0 24 24" aria-label="claude"><g fill="#D97757">
+        <path d="M12 2.6l1.6 6.1 4.4-4.4-2.7 5.7 6.1-1.6-5.5 3.2 5.5 3.2-6.1-1.6 2.7 5.7-4.4-4.4L12 21l-1.6-6.1-4.4 4.4 2.7-5.7-6.1 1.6L8.1 12 2.6 8.8l6.1 1.6-2.7-5.7 4.4 4.4z"/>
+      </g></svg>`;
+    case "codex":
+      return `<svg class="agent-logo" viewBox="0 0 24 24" aria-label="codex">
+        <circle cx="12" cy="12" r="8.4" fill="none" stroke="#7FA6FF" stroke-width="2"/>
+        <circle cx="12" cy="12" r="2.6" fill="#7FA6FF"/>
+      </svg>`;
+    case "gemini":
+      return `<svg class="agent-logo" viewBox="0 0 24 24" aria-label="gemini">
+        <path d="M12 2c.5 5.2 4.3 9 9.5 10-5.2 1-9 4.8-9.5 10-.5-5.2-4.3-9-9.5-10 5.2-1 9-4.8 9.5-10z" fill="#7C9CFF"/>
+      </svg>`;
+    default:
+      return `<span class="agent-logo letter">${esc(agent.slice(0, 1).toUpperCase())}</span>`;
+  }
 }
 
 /* ---------- agent 行状态与展示 ---------- */
@@ -251,28 +323,52 @@ function renderDaily() {
         const key = `${a.agent}:${a.cwd ?? a.pid}`;
         const state = dotState(a);
         const p = usage?.per_project.find((x) => x.cwd === a.cwd);
-        const meta = p
-          ? `${p.edits} 处改动 · ${durationText(p)} · ${fmt(p.tokens)} tokens`
-          : "—";
         const st = a.cwd ? agentStatus[a.cwd] : undefined;
         const open = openRows.has(key);
+
+        // 主行右侧:改动优先(它比 token 更能说明这个会话干了什么)
+        const diffTxt =
+          a.dirty_files > 0
+            ? `${a.dirty_files} 改动${a.insertions || a.deletions ? ` +${a.insertions}/-${a.deletions}` : ""}`
+            : "";
+        const usageTxt = p ? `${durationText(p)} · ${fmt(p.tokens)} tokens` : "";
+        const right = [fields.diff ? diffTxt : "", fields.usage ? usageTxt : ""]
+          .filter(Boolean)
+          .join(" · ");
+
+        // 次行:目录 + 分支
+        const metaBits: string[] = [];
+        if (fields.folder && a.project) metaBits.push(esc(a.project));
+        if (fields.branch && a.branch) metaBits.push(`⑂ ${esc(a.branch)}`);
+        const metaLine = metaBits.length
+          ? `<div class="agent-meta sub mono">${metaBits.join("  ")}</div>`
+          : "";
+
+        // 任务概述占主行,这是最该被看到的一条
+        const task = fields.task ? st?.last_task?.trim() : "";
+        const taskLine = fields.task
+          ? `<span class="agent-task ${task ? "" : "muted"}">${esc(task || "暂无任务记录")}</span>`
+          : "";
+
         const detail = open
           ? `<div class="agent-detail">
-               <div class="detail-line"><span class="detail-k">当前任务</span>${esc(st?.last_task || "(暂无任务记录)")}</div>
+               <div class="detail-line"><span class="detail-k">完整任务</span>${esc(st?.last_task || "(暂无任务记录)")}</div>
                <div class="detail-line"><span class="detail-k">目录</span><span class="mono">${esc(a.cwd ?? "—")}</span></div>
+               <div class="detail-line"><span class="detail-k">分支</span><span class="mono">${esc(a.branch ?? "—")}</span></div>
                <div class="detail-line"><span class="detail-k">状态</span>${DOT_LABEL[state]}</div>
              </div>`
           : "";
         return `
       <div class="agent-row" data-key="${esc(key)}" data-cwd="${esc(a.cwd ?? "")}">
-        <div class="row">
+        <div class="row agent-main">
           <span class="dot ${state}"></span>
-          <span class="label strong">${esc(a.agent)}</span>
-          <span class="sub">${esc(a.project ?? "")}</span>
+          ${agentLogo(a.agent)}
+          ${taskLine}
           <span class="spacer"></span>
-          <span class="sub mono">${meta}</span>
+          <span class="sub mono agent-right">${esc(right)}</span>
           <span class="chev-sm">${open ? "⌄" : "›"}</span>
         </div>
+        ${metaLine}
         ${detail}
       </div>`;
       })
@@ -839,8 +935,10 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   $("tab-settings").addEventListener("click", () => {
     showSettings = !showSettings;
+    if (showSettings) renderFieldToggles();
     render();
   });
+  renderFieldToggles();
   $("s-quit").addEventListener("click", () => void getCurrentWindow().close());
   void invoke<Record<string, string>>("app_meta")
     .then((m) => ($("s-version").textContent = `v${m.version}`))

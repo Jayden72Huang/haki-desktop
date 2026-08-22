@@ -29,6 +29,11 @@ hackertrip-desktop/
     └── usage-summary.json    # 真实数据快照(脚本生成)
 ```
 
+## 文档
+
+- [使用说明书 MANUAL.md](./MANUAL.md) — 每个功能怎么用、首次配置清单、常见问题
+- [功能迭代说明 ITERATION.md](./ITERATION.md) — 本次改了什么、技术取舍与踩过的坑
+
 ## 开发
 
 ```bash

@@ -617,3 +617,276 @@ textarea:focus {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ============ 品牌 logo(胶囊条 + 面板头) ============ */
+.brand-logo {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  object-fit: contain;
+  pointer-events: none; /* 不挡拖拽 */
+}
+.pill .brand-logo {
+  width: 18px;
+  height: 18px;
+}
+
+/* ============ Token 用量视图 ============ */
+.tab.active {
+  color: var(--text);
+  border-color: rgba(139, 79, 232, 0.7);
+  background: rgba(139, 79, 232, 0.16);
+}
+
+.quota-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 4px 0 12px;
+}
+.quota-card {
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.qhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.qhead .agent-logo {
+  width: 18px;
+  height: 18px;
+}
+.qname {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.qhead .badge {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.badge.warn {
+  background: rgba(255, 211, 77, 0.13);
+  color: var(--warn-yellow);
+  font-weight: 500;
+}
+.qrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.qwin {
+  width: 20px;
+  font-size: 12px;
+  color: var(--mut);
+  flex: none;
+}
+.qbar {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--sunken);
+  overflow: hidden;
+}
+.qbar.slim {
+  height: 4px;
+}
+.qbar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--grad);
+}
+.qbar-fill.warn {
+  background: linear-gradient(90deg, #f8964a, #ffd34d);
+}
+.qbar-fill.danger {
+  background: linear-gradient(90deg, #f0557e, #ff5d4d);
+}
+.qpct {
+  font-size: 12px;
+  color: var(--sub);
+  flex: none;
+  min-width: 34px;
+  text-align: right;
+}
+.qpct.warn {
+  color: var(--warn-yellow);
+}
+.qpct.danger {
+  color: var(--urgent);
+}
+.qrow .sub {
+  font-size: 12px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.stat-card {
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stat-label {
+  font-size: 11px;
+  color: var(--mut);
+}
+.stat-value {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+}
+.stat-value.green {
+  color: var(--success);
+}
+.stat-value.blue {
+  color: var(--run-blue);
+}
+
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.06);
+}
+.model-row:last-child {
+  border-bottom: none;
+}
+.model-name {
+  font-size: 12px;
+  color: var(--sub);
+  width: 150px;
+  flex: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-row .qpct {
+  min-width: 52px;
+}
+
+/* ============ 用量视图 v2:对齐 Vibe Usage 版式 ============ */
+.usage-divider {
+  height: 0.5px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 2px 0 12px;
+}
+
+/* 时间范围 pills:参考图的胶囊组,选中态用品牌渐变描边 */
+.range-tabs {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+  margin-bottom: 12px;
+}
+.range-btn {
+  border: none;
+  background: transparent;
+  color: var(--mut);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.range-btn:hover {
+  color: var(--sub);
+}
+.range-btn.active {
+  background: var(--sunken);
+  color: var(--text);
+  font-weight: 600;
+}
+.range-tabs.mini {
+  margin-bottom: 0;
+  padding: 2px;
+}
+.range-tabs.mini .range-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+/* 额度卡头部:logo 放圆角磁贴里,对齐参考图 */
+.logo-tile {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--sunken);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.logo-tile .agent-logo {
+  width: 16px;
+  height: 16px;
+}
+
+/* 分布卡:替代参考图的趋势图(暂无小时级数据) */
+.dist-card {
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.dist-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.dist-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.model-sub {
+  font-size: 11px;
+  color: var(--mut);
+  flex: none;
+  width: 52px;
+  text-align: right;
+}
+
+/* 底部同步状态 */
+.usage-foot {
+  border-bottom: none;
+  padding-top: 8px;
+}
+.sync-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mut);
+  margin-right: 8px;
+  flex: none;
+}
+.sync-dot.ok {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(46, 216, 136, 0.6);
+}
+
+/* 统计卡数字更大更醒目,贴近参考图 */
+.stat-value {
+  font-size: 19px;
+  letter-spacing: -0.02em;
+}

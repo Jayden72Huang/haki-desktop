@@ -12,6 +12,7 @@
     <!-- 收起态:胶囊条 -->
     <div id="pill" class="pill" data-tauri-drag-region>
       <span class="chev" data-tauri-drag-region>›</span>
+      <img class="brand-logo" src="/src/assets/logo.png" alt="" data-tauri-drag-region />
       <span class="title" id="pill-title" data-tauri-drag-region>HackerTrip</span>
       <span class="spacer" data-tauri-drag-region></span>
       <span class="badge mono" id="pill-main">—</span>
@@ -22,6 +23,7 @@
     <div id="panel" class="panel hidden">
       <div class="panel-header">
         <span class="chev" id="collapse-btn">⌄</span>
+        <img class="brand-logo" src="/src/assets/logo.png" alt="" data-tauri-drag-region />
         <span class="title" data-tauri-drag-region>HackerTrip</span>
         <span class="spacer" data-tauri-drag-region></span>
         <div class="seg" id="mode-seg">
@@ -36,10 +38,41 @@
         <button class="tab" data-url="https://hackertrip.space/dashboard">我的 ↗</button>
         <button class="tab" data-url="https://hackertrip.space/guides">指南 ↗</button>
         <span class="spacer"></span>
+        <button class="tab" id="tab-usage">用量</button>
         <button class="tab" id="tab-settings">设置</button>
       </div>
 
       <div id="panel-body">
+
+      <!-- ============ Token 用量 ============ -->
+      <div id="usage-view" class="hidden">
+        <div class="quota-grid" id="u-quota"><div class="row"><span class="sub">读取额度中…</span></div></div>
+        <div class="usage-divider"></div>
+        <div class="range-tabs" id="u-range">
+          <button class="range-btn" data-range="today">今天</button>
+          <button class="range-btn" data-range="7">7D</button>
+          <button class="range-btn" data-range="30">30D</button>
+          <button class="range-btn" data-range="90">90D</button>
+        </div>
+        <div class="stat-grid" id="u-stats"></div>
+        <div class="dist-card">
+          <div class="dist-head">
+            <span class="dist-title">用量分布</span>
+            <span class="spacer"></span>
+            <div class="range-tabs mini" id="u-dist-seg">
+              <button class="range-btn" data-dist="model">模型</button>
+              <button class="range-btn" data-dist="project">项目</button>
+            </div>
+          </div>
+          <div id="u-dist"></div>
+        </div>
+        <div class="row usage-foot">
+          <span class="sync-dot" id="u-sync-dot"></span>
+          <span class="sub" id="u-synced">—</span>
+          <span class="spacer"></span>
+          <button class="action" id="u-refresh">↻ 更新数据</button>
+        </div>
+      </div>
 
       <!-- ============ 设置 ============ -->
       <div id="settings-view" class="hidden">

@@ -30,12 +30,243 @@ pub struct UsageToday {
     /// 今日出现过的项目工作目录(来自日志里的 cwd 字段)
     pub projects: Vec<String>,
     pub per_project: Vec<ProjectToday>,
+    /// Claude 侧按模型细分(经 router 跑的 deepseek/kimi 等也在这里,按 model 字段区分)
+    pub models: Vec<ModelStat>,
+    /// 各数据来源(claude / codex)的用量,前端据此展示多 CLI 合计
+    pub sources: Vec<SourceUsage>,
 }
 
 const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 fn claude_projects_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+}
+
+fn codex_sessions_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
+}
+
+/// 递归找出 mtime 在 cutoff 之后的 .jsonl。
+/// Claude 的 subagent 日志在 <项目>/<会话id>/subagents/ 第三层,
+/// Codex 的在 sessions/YYYY/MM/DD/ 下,都必须递归才扫得全。
+fn jsonl_files_since(root: &PathBuf, cutoff: SystemTime) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "jsonl")
+                && entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t >= cutoff)
+                    .unwrap_or(false)
+            {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// 单一数据来源(claude / codex / …)的用量,按模型细分
+#[derive(Serialize, Default, Clone)]
+pub struct SourceUsage {
+    pub source: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub total: u64,
+    pub sessions: usize,
+    pub models: Vec<ModelStat>,
+}
+
+fn models_sorted(m: HashMap<String, u64>) -> Vec<ModelStat> {
+    let mut v: Vec<ModelStat> = m
+        .into_iter()
+        .map(|(model, tokens)| ModelStat { model, tokens })
+        .collect();
+    v.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    v
+}
+
+/// Codex 用量:解析 ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl。
+/// 计算方法与 vibeusage/ccusage 同口径:累加每条 token_count 事件的
+/// last_token_usage(单次增量),绝不能累加 total_token_usage(会话累计值)。
+/// 模型名来自最近一条 turn_context 事件(token_count 本身不带模型)。
+fn collect_codex_usage(since_ts: &str, mtime_cutoff: SystemTime) -> SourceUsage {
+    let mut su = SourceUsage {
+        source: "codex".into(),
+        ..Default::default()
+    };
+    let Some(root) = codex_sessions_dir() else {
+        return su;
+    };
+    if !root.is_dir() {
+        return su;
+    }
+    let mut models: HashMap<String, u64> = HashMap::new();
+    let mut sessions: HashSet<PathBuf> = HashSet::new();
+    // resume 会把历史事件重放进新 rollout 文件,按 时间戳+累计值 全局去重
+    let mut seen: HashSet<String> = HashSet::new();
+    for path in jsonl_files_since(&root, mtime_cutoff) {
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        let mut current_model = String::from("gpt-unknown");
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let is_turn = line.contains("\"turn_context\"");
+            if !is_turn && !line.contains("\"token_count\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if is_turn && v["type"] == "turn_context" {
+                if let Some(m) = v["payload"]["model"].as_str() {
+                    current_model = m.to_string();
+                }
+                continue;
+            }
+            if v["type"] != "event_msg" || v["payload"]["type"] != "token_count" {
+                continue;
+            }
+            let ts = v["timestamp"].as_str().unwrap_or("");
+            if ts < since_ts {
+                continue;
+            }
+            let info = &v["payload"]["info"];
+            let Some(last) = info["last_token_usage"].as_object() else {
+                continue;
+            };
+            let cum = info["total_token_usage"]["total_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            if !seen.insert(format!("{ts}:{cum}")) {
+                continue;
+            }
+            let g = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            // codex 的 input_tokens 含缓存命中,拆开成与 Claude 一致的口径
+            let cached = g("cached_input_tokens");
+            let input = g("input_tokens").saturating_sub(cached);
+            let output = g("output_tokens");
+            let cache_write = g("cache_write_input_tokens");
+            su.input += input;
+            su.output += output;
+            su.cache_read += cached;
+            su.cache_write += cache_write;
+            *models.entry(current_model.clone()).or_insert(0) +=
+                input + output + cached + cache_write;
+            sessions.insert(path.clone());
+        }
+    }
+    su.total = su.input + su.output + su.cache_write + su.cache_read;
+    su.sessions = sessions.len();
+    su.models = models_sorted(models);
+    su
+}
+
+fn grok_sessions_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".grok").join("sessions"))
+}
+
+/// Grok CLI 用量:~/.grok/sessions/<url编码的项目路径>/<会话id>/updates.jsonl。
+/// 每次用户 prompt 结束会落一条 turn_completed 事件,usage 是该轮整个
+/// agentic 循环的增量(实测多轮数值不递增,非累计值),modelUsage 按模型细分。
+/// 事件时间戳是 unix 秒;按 prompt_id 全局去重防 resume 重放。
+fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage {
+    let mut su = SourceUsage {
+        source: "grok".into(),
+        ..Default::default()
+    };
+    let Some(root) = grok_sessions_dir() else {
+        return su;
+    };
+    if !root.is_dir() {
+        return su;
+    }
+    let mut models: HashMap<String, u64> = HashMap::new();
+    let mut sessions: HashSet<PathBuf> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for path in jsonl_files_since(&root, mtime_cutoff) {
+        // chat_history.jsonl 等文件会把 turn_completed 内嵌进消息文本,只认 updates.jsonl
+        if path.file_name().is_none_or(|n| n != "updates.jsonl") {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if !line.contains("turn_completed") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let update = &v["params"]["update"];
+            if update["sessionUpdate"] != "turn_completed" {
+                continue;
+            }
+            let ts = v["timestamp"].as_i64().unwrap_or(0);
+            if ts < since_epoch {
+                continue;
+            }
+            let key = update["prompt_id"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| format!("{}:{ts}", path.display()));
+            if !seen.insert(key) {
+                continue;
+            }
+            let usage = &update["usage"];
+            // 优先 modelUsage 按模型分账,没有就整轮记到 grok-unknown
+            let per_model: Vec<(String, &serde_json::Value)> = match usage["modelUsage"].as_object()
+            {
+                Some(m) if !m.is_empty() => m.iter().map(|(k, v)| (k.clone(), v)).collect(),
+                _ => vec![("grok-unknown".to_string(), usage)],
+            };
+            for (model, mu) in per_model {
+                let g = |k: &str| mu[k].as_u64().unwrap_or(0);
+                // grok 的 inputTokens 含缓存命中,拆开成与 Claude 一致的口径
+                let cached = g("cachedReadTokens");
+                let input = g("inputTokens").saturating_sub(cached);
+                let output = g("outputTokens");
+                let cache_write = g("cacheCreationTokens");
+                su.input += input;
+                su.output += output;
+                su.cache_read += cached;
+                su.cache_write += cache_write;
+                *models.entry(model).or_insert(0) += input + output + cached + cache_write;
+            }
+            if let Some(dir) = path.parent() {
+                sessions.insert(dir.to_path_buf());
+            }
+        }
+    }
+    su.total = su.input + su.output + su.cache_write + su.cache_read;
+    su.sessions = sessions.len();
+    su.models = models_sorted(models);
+    su
+}
+
+/// 本地时区今天零点的 unix 秒(grok 日志用 epoch 时间戳)
+fn local_today_start_epoch() -> i64 {
+    use chrono::TimeZone;
+    let midnight = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 恒为合法时间");
+    chrono::Local
+        .from_local_datetime(&midnight)
+        .single()
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0)
 }
 
 /// 本地时区今天零点对应的 UTC 时间串(日志时间戳是 UTC ISO,前缀可比较)
@@ -49,7 +280,11 @@ fn local_today_start_utc() -> String {
     chrono::Local
         .from_local_datetime(&midnight)
         .single()
-        .map(|dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%S").to_string())
+        .map(|dt| {
+            dt.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string())
 }
 
@@ -65,93 +300,84 @@ fn usage_today() -> Result<UsageToday, String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut projects: HashSet<String> = HashSet::new();
     let mut per_project: HashMap<String, ProjectToday> = HashMap::new();
+    let mut models: HashMap<String, u64> = HashMap::new();
 
-    let dirs_iter = fs::read_dir(&root).map_err(|e| e.to_string())?;
-    for dir in dirs_iter.flatten() {
-        let Ok(entries) = fs::read_dir(dir.path()) else {
+    for path in jsonl_files_since(&root, cutoff) {
+        result.scanned_files += 1;
+        let Ok(file) = fs::File::open(&path) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "jsonl") {
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if !line.contains("\"usage\"") {
                 continue;
             }
-            let fresh = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|t| t >= cutoff)
-                .unwrap_or(false);
-            if !fresh {
-                continue;
-            }
-            result.scanned_files += 1;
-
-            let Ok(file) = fs::File::open(&path) else {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            for line in BufReader::new(file).lines().map_while(Result::ok) {
-                if !line.contains("\"usage\"") {
-                    continue;
+            if v["type"] != "assistant" {
+                continue;
+            }
+            let ts = v["timestamp"].as_str().unwrap_or("");
+            if ts < today_start.as_str() {
+                continue;
+            }
+            let Some(usage) = v["message"]["usage"].as_object() else {
+                continue;
+            };
+            // 流式写入会让同一条消息重复出现,按 message.id + requestId 去重
+            let key = format!(
+                "{}:{}",
+                v["message"]["id"].as_str().unwrap_or(""),
+                v["requestId"]
+                    .as_str()
+                    .unwrap_or_else(|| v["uuid"].as_str().unwrap_or(""))
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            let line_tokens = g("input_tokens")
+                + g("output_tokens")
+                + g("cache_creation_input_tokens")
+                + g("cache_read_input_tokens");
+            result.input += g("input_tokens");
+            result.output += g("output_tokens");
+            result.cache_write += g("cache_creation_input_tokens");
+            result.cache_read += g("cache_read_input_tokens");
+            if let Some(model) = v["message"]["model"].as_str() {
+                if model != "<synthetic>" {
+                    *models.entry(model.to_string()).or_insert(0) += line_tokens;
                 }
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                if v["type"] != "assistant" {
-                    continue;
-                }
-                let ts = v["timestamp"].as_str().unwrap_or("");
-                if ts < today_start.as_str() {
-                    continue;
-                }
-                let Some(usage) = v["message"]["usage"].as_object() else {
-                    continue;
-                };
-                // 流式写入会让同一条消息重复出现,按 message.id + requestId 去重
-                let key = format!(
-                    "{}:{}",
-                    v["message"]["id"].as_str().unwrap_or(""),
-                    v["requestId"].as_str().unwrap_or_else(|| v["uuid"].as_str().unwrap_or(""))
-                );
-                if !seen.insert(key) {
-                    continue;
-                }
-                let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                let line_tokens = g("input_tokens")
-                    + g("output_tokens")
-                    + g("cache_creation_input_tokens")
-                    + g("cache_read_input_tokens");
-                result.input += g("input_tokens");
-                result.output += g("output_tokens");
-                result.cache_write += g("cache_creation_input_tokens");
-                result.cache_read += g("cache_read_input_tokens");
-                if let Some(sid) = v["sessionId"].as_str() {
-                    sessions.insert(sid.to_string());
-                }
-                if let Some(cwd) = v["cwd"].as_str() {
-                    if !cwd.is_empty() {
-                        projects.insert(cwd.to_string());
-                        let p = per_project.entry(cwd.to_string()).or_insert_with(|| ProjectToday {
+            }
+            if let Some(sid) = v["sessionId"].as_str() {
+                sessions.insert(sid.to_string());
+            }
+            if let Some(cwd) = v["cwd"].as_str() {
+                if !cwd.is_empty() {
+                    projects.insert(cwd.to_string());
+                    let p = per_project
+                        .entry(cwd.to_string())
+                        .or_insert_with(|| ProjectToday {
                             cwd: cwd.to_string(),
                             first_ts: ts.to_string(),
                             last_ts: ts.to_string(),
                             ..Default::default()
                         });
-                        p.tokens += line_tokens;
-                        if ts < p.first_ts.as_str() {
-                            p.first_ts = ts.to_string();
-                        }
-                        if ts > p.last_ts.as_str() {
-                            p.last_ts = ts.to_string();
-                        }
-                        if let Some(content) = v["message"]["content"].as_array() {
-                            for item in content {
-                                if item["type"] == "tool_use"
-                                    && item["name"]
-                                        .as_str()
-                                        .is_some_and(|n| EDIT_TOOLS.contains(&n))
-                                {
-                                    p.edits += 1;
-                                }
+                    p.tokens += line_tokens;
+                    if ts < p.first_ts.as_str() {
+                        p.first_ts = ts.to_string();
+                    }
+                    if ts > p.last_ts.as_str() {
+                        p.last_ts = ts.to_string();
+                    }
+                    if let Some(content) = v["message"]["content"].as_array() {
+                        for item in content {
+                            if item["type"] == "tool_use"
+                                && item["name"]
+                                    .as_str()
+                                    .is_some_and(|n| EDIT_TOOLS.contains(&n))
+                            {
+                                p.edits += 1;
                             }
                         }
                     }
@@ -165,6 +391,21 @@ fn usage_today() -> Result<UsageToday, String> {
     let mut pp: Vec<ProjectToday> = per_project.into_values().collect();
     pp.sort_by(|a, b| b.tokens.cmp(&a.tokens));
     result.per_project = pp;
+    result.models = models_sorted(models);
+
+    let claude_source = SourceUsage {
+        source: "claude".into(),
+        input: result.input,
+        output: result.output,
+        cache_write: result.cache_write,
+        cache_read: result.cache_read,
+        total: result.all,
+        sessions: result.sessions,
+        models: result.models.clone(),
+    };
+    let codex_source = collect_codex_usage(&today_start, cutoff);
+    let grok_source = collect_grok_usage(local_today_start_epoch(), cutoff);
+    result.sources = vec![claude_source, codex_source, grok_source];
     Ok(result)
 }
 
@@ -275,7 +516,9 @@ fn codex_status(cwd: &str) -> Result<AgentStatus, String> {
     // 只在最近 300 个会话里找,再旧的即使匹配也不是「当前正在跑的那个」
     let mut hit: Option<(String, SystemTime, PathBuf)> = None;
     for (path, mtime) in files.iter().take(300) {
-        let Ok(f) = fs::File::open(path) else { continue };
+        let Ok(f) = fs::File::open(path) else {
+            continue;
+        };
         let mut first = String::new();
         if BufReader::new(f).read_line(&mut first).is_err() {
             continue;
@@ -346,7 +589,10 @@ fn agent_status(cwd: String, agent: Option<String>) -> Result<AgentStatus, Strin
     let root = claude_projects_dir().ok_or("找不到用户目录")?;
     let dir = root.join(encode_project_dir(&cwd));
     let mut latest: Option<(PathBuf, SystemTime)> = None;
-    for e in fs::read_dir(&dir).map_err(|_| "该项目暂无会话记录")?.flatten() {
+    for e in fs::read_dir(&dir)
+        .map_err(|_| "该项目暂无会话记录")?
+        .flatten()
+    {
         let p = e.path();
         if p.extension().is_none_or(|x| x != "jsonl") {
             continue;
@@ -498,7 +744,9 @@ fn git_snapshot(path: &str) -> (Option<String>, u32, u32, u32) {
     (branch, dirty, ins, del)
 }
 
-const AGENT_BINS: &[&str] = &["claude", "codex", "aider", "gemini", "opencode", "amp", "goose"];
+const AGENT_BINS: &[&str] = &[
+    "claude", "codex", "aider", "gemini", "opencode", "amp", "goose",
+];
 
 /// lsof -F 会把非 ASCII 字节输出成 \xAB 转义,这里还原回 UTF-8(中文目录名)
 fn decode_lsof_escapes(s: &str) -> String {
@@ -592,7 +840,12 @@ pub struct RepoToday {
 }
 
 fn git(path: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(path).args(args).output().ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -615,7 +868,13 @@ fn dev_today(paths: Vec<String>) -> Vec<RepoToday> {
             continue;
         }
         let commits_today = git(&root, &["log", "--oneline", "--since=midnight"])
-            .map(|s| if s.is_empty() { 0 } else { s.lines().count() as u32 })
+            .map(|s| {
+                if s.is_empty() {
+                    0
+                } else {
+                    s.lines().count() as u32
+                }
+            })
             .unwrap_or(0);
         let unpushed = git(&root, &["rev-list", "--count", "@{u}..HEAD"])
             .and_then(|s| s.parse().ok())
@@ -663,7 +922,10 @@ async fn ai_daily_summary(data: String) -> Result<String, String> {
             .output()
             .map_err(|e| format!("调用 claude CLI 失败: {e}"))?;
         if !out.status.success() {
-            return Err(format!("claude CLI 返回错误: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(format!(
+                "claude CLI 返回错误: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     })
@@ -793,7 +1055,7 @@ pub struct SkillStat {
     pub count: u32,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct ModelStat {
     pub model: String,
     pub tokens: u64,
@@ -811,6 +1073,8 @@ pub struct ProfileStats {
     pub skills: Vec<SkillStat>,
     pub models: Vec<ModelStat>,
     pub projects: Vec<ProjectStat>,
+    /// 各数据来源(claude / codex)按模型细分的用量
+    pub sources: Vec<SourceUsage>,
 }
 
 /// git remote URL 归一化成 github.com/owner/repo 形式
@@ -822,7 +1086,15 @@ fn normalize_repo(url: &str) -> String {
             break;
         }
     }
-    s = s.replacen(':', "/", if s.contains(".com:") || s.contains(".org:") { 1 } else { 0 });
+    s = s.replacen(
+        ':',
+        "/",
+        if s.contains(".com:") || s.contains(".org:") {
+            1
+        } else {
+            0
+        },
+    );
     s.trim_end_matches(".git").trim_end_matches('/').to_string()
 }
 
@@ -852,113 +1124,106 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
     let mut minutes_set: HashSet<String> = HashSet::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut total_tokens = 0u64;
+    let mut total_input = 0u64;
     let mut total_output = 0u64;
+    let mut total_cache_write = 0u64;
+    let mut total_cache_read = 0u64;
     let mut total_edits = 0u32;
 
-    for dir in fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
-        let Ok(entries) = fs::read_dir(dir.path()) else {
+    for path in jsonl_files_since(&root, cutoff_sys) {
+        let Ok(file) = fs::File::open(&path) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "jsonl") {
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let has_usage = line.contains("\"usage\"");
+            let has_command = line.contains("<command-name>");
+            if !has_usage && !has_command {
                 continue;
             }
-            let fresh = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|t| t >= cutoff_sys)
-                .unwrap_or(false);
-            if !fresh {
-                continue;
-            }
-            let Ok(file) = fs::File::open(&path) else {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            for line in BufReader::new(file).lines().map_while(Result::ok) {
-                let has_usage = line.contains("\"usage\"");
-                let has_command = line.contains("<command-name>");
-                if !has_usage && !has_command {
-                    continue;
-                }
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                let ts = v["timestamp"].as_str().unwrap_or("");
-                if ts.is_empty() || ts[..10.min(ts.len())] < cutoff_day[..] {
-                    continue;
-                }
+            let ts = v["timestamp"].as_str().unwrap_or("");
+            if ts.is_empty() || ts[..10.min(ts.len())] < cutoff_day[..] {
+                continue;
+            }
 
-                // skill 使用:用户消息里的 <command-name>/xxx</command-name>
-                if has_command && v["type"] == "user" {
-                    if let Some(content) = v["message"]["content"].as_str() {
-                        if let Some(name) = content
-                            .split("<command-name>")
-                            .nth(1)
-                            .and_then(|s| s.split("</command-name>").next())
-                        {
-                            let name = name.trim().trim_start_matches('/').to_string();
-                            if !name.is_empty() && !BUILTIN_COMMANDS.contains(&name.as_str()) {
-                                *skills.entry(name).or_insert(0) += 1;
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if v["type"] != "assistant" {
-                    continue;
-                }
-                let Some(usage) = v["message"]["usage"].as_object() else {
-                    continue;
-                };
-                let key = format!(
-                    "{}:{}",
-                    v["message"]["id"].as_str().unwrap_or(""),
-                    v["requestId"].as_str().unwrap_or_else(|| v["uuid"].as_str().unwrap_or(""))
-                );
-                if !seen.insert(key) {
-                    continue;
-                }
-                let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                let line_tokens = g("input_tokens")
-                    + g("output_tokens")
-                    + g("cache_creation_input_tokens")
-                    + g("cache_read_input_tokens");
-                total_tokens += line_tokens;
-                total_output += g("output_tokens");
-                days_set.insert(ts[..10].to_string());
-                minutes_set.insert(ts[..16.min(ts.len())].to_string());
-                if let Some(sid) = v["sessionId"].as_str() {
-                    sessions.insert(sid.to_string());
-                }
-                if let Some(model) = v["message"]["model"].as_str() {
-                    if model != "<synthetic>" {
-                        *models.entry(model.to_string()).or_insert(0) += line_tokens;
-                    }
-                }
-                let mut edits = 0u32;
-                if let Some(content) = v["message"]["content"].as_array() {
-                    for item in content {
-                        if item["type"] == "tool_use"
-                            && item["name"].as_str().is_some_and(|n| EDIT_TOOLS.contains(&n))
-                        {
-                            edits += 1;
+            // skill 使用:用户消息里的 <command-name>/xxx</command-name>
+            if has_command && v["type"] == "user" {
+                if let Some(content) = v["message"]["content"].as_str() {
+                    if let Some(name) = content
+                        .split("<command-name>")
+                        .nth(1)
+                        .and_then(|s| s.split("</command-name>").next())
+                    {
+                        let name = name.trim().trim_start_matches('/').to_string();
+                        if !name.is_empty() && !BUILTIN_COMMANDS.contains(&name.as_str()) {
+                            *skills.entry(name).or_insert(0) += 1;
                         }
                     }
                 }
-                total_edits += edits;
-                if let Some(cwd) = v["cwd"].as_str() {
-                    if !cwd.is_empty() {
-                        let p = per_cwd.entry(cwd.to_string()).or_insert_with(|| Proj {
-                            tokens: 0,
-                            edits: 0,
-                            minutes: HashSet::new(),
-                        });
-                        p.tokens += line_tokens;
-                        p.edits += edits;
-                        p.minutes.insert(ts[..16.min(ts.len())].to_string());
+                continue;
+            }
+
+            if v["type"] != "assistant" {
+                continue;
+            }
+            let Some(usage) = v["message"]["usage"].as_object() else {
+                continue;
+            };
+            let key = format!(
+                "{}:{}",
+                v["message"]["id"].as_str().unwrap_or(""),
+                v["requestId"]
+                    .as_str()
+                    .unwrap_or_else(|| v["uuid"].as_str().unwrap_or(""))
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            let line_tokens = g("input_tokens")
+                + g("output_tokens")
+                + g("cache_creation_input_tokens")
+                + g("cache_read_input_tokens");
+            total_tokens += line_tokens;
+            total_input += g("input_tokens");
+            total_output += g("output_tokens");
+            total_cache_write += g("cache_creation_input_tokens");
+            total_cache_read += g("cache_read_input_tokens");
+            days_set.insert(ts[..10].to_string());
+            minutes_set.insert(ts[..16.min(ts.len())].to_string());
+            if let Some(sid) = v["sessionId"].as_str() {
+                sessions.insert(sid.to_string());
+            }
+            if let Some(model) = v["message"]["model"].as_str() {
+                if model != "<synthetic>" {
+                    *models.entry(model.to_string()).or_insert(0) += line_tokens;
+                }
+            }
+            let mut edits = 0u32;
+            if let Some(content) = v["message"]["content"].as_array() {
+                for item in content {
+                    if item["type"] == "tool_use"
+                        && item["name"]
+                            .as_str()
+                            .is_some_and(|n| EDIT_TOOLS.contains(&n))
+                    {
+                        edits += 1;
                     }
+                }
+            }
+            total_edits += edits;
+            if let Some(cwd) = v["cwd"].as_str() {
+                if !cwd.is_empty() {
+                    let p = per_cwd.entry(cwd.to_string()).or_insert_with(|| Proj {
+                        tokens: 0,
+                        edits: 0,
+                        minutes: HashSet::new(),
+                    });
+                    p.tokens += line_tokens;
+                    p.edits += edits;
+                    p.minutes.insert(ts[..16.min(ts.len())].to_string());
                 }
             }
         }
@@ -994,11 +1259,27 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
     skills_vec.sort_by(|a, b| b.count.cmp(&a.count));
     skills_vec.truncate(30);
 
-    let mut models_vec: Vec<ModelStat> = models
-        .into_iter()
-        .map(|(model, tokens)| ModelStat { model, tokens })
-        .collect();
-    models_vec.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    let models_vec = models_sorted(models);
+
+    let claude_source = SourceUsage {
+        source: "claude".into(),
+        input: total_input,
+        output: total_output,
+        cache_write: total_cache_write,
+        cache_read: total_cache_read,
+        total: total_tokens,
+        sessions: sessions.len(),
+        models: models_vec.clone(),
+    };
+    let codex_source = collect_codex_usage(&format!("{cutoff_day}T00:00:00"), cutoff_sys);
+    // 与 cutoff_day(UTC 零点)同口径的 epoch 秒
+    let cutoff_epoch = (chrono::Utc::now() - chrono::Duration::days(days as i64))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 恒为合法时间")
+        .and_utc()
+        .timestamp();
+    let grok_source = collect_grok_usage(cutoff_epoch, cutoff_sys);
 
     Ok(ProfileStats {
         period_days: days,
@@ -1011,6 +1292,7 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
         skills: skills_vec,
         models: models_vec,
         projects,
+        sources: vec![claude_source, codex_source, grok_source],
     })
 }
 
@@ -1023,10 +1305,15 @@ async fn profile_stats(days: u32) -> Result<ProfileStats, String> {
 
 /// 聚合并上报到 HackerTrip 云端(绑定 API Key 对应的账号)
 #[tauri::command]
-async fn sync_profile(api_key: String, days: u32, endpoint: Option<String>) -> Result<String, String> {
+async fn sync_profile(
+    api_key: String,
+    days: u32,
+    endpoint: Option<String>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let stats = collect_profile_stats(days.clamp(1, 365))?;
-        let url = endpoint.unwrap_or_else(|| "https://hackertrip.space/api/desktop/stats".to_string());
+        let url =
+            endpoint.unwrap_or_else(|| "https://hackertrip.space/api/desktop/stats".to_string());
         let payload = serde_json::json!({
             "periodDays": stats.period_days,
             "totals": {
@@ -1040,6 +1327,8 @@ async fn sync_profile(api_key: String, days: u32, endpoint: Option<String>) -> R
             "skills": stats.skills,
             "models": stats.models,
             "projects": stats.projects,
+            // 多来源(claude/codex)按模型细分,老服务端不认识该字段会自动忽略
+            "sources": stats.sources,
             "clientVersion": env!("CARGO_PKG_VERSION"),
         });
         let resp = ureq::post(&url)
@@ -1050,7 +1339,9 @@ async fn sync_profile(api_key: String, days: u32, endpoint: Option<String>) -> R
                 .body_mut()
                 .read_to_string()
                 .unwrap_or_else(|_| "{\"ok\":true}".into())),
-            Err(ureq::Error::StatusCode(code)) => Err(format!("服务端返回 {code}(检查 API Key 是否有效)")),
+            Err(ureq::Error::StatusCode(code)) => {
+                Err(format!("服务端返回 {code}(检查 API Key 是否有效)"))
+            }
             Err(e) => Err(format!("网络请求失败: {e}")),
         }
     })
@@ -1160,7 +1451,10 @@ async fn github_login(endpoint_base: Option<String>) -> Result<String, String> {
 
 /// 用 API Key 找服务端要一个小程序绑定码(6 位,10 分钟有效)
 #[tauri::command]
-async fn request_pair_code(api_key: String, endpoint_base: Option<String>) -> Result<String, String> {
+async fn request_pair_code(
+    api_key: String,
+    endpoint_base: Option<String>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let base = endpoint_base.unwrap_or_else(|| "https://hackertrip.space".to_string());
         let resp = ureq::post(&format!("{base}/api/pair/code"))
@@ -1361,12 +1655,176 @@ fn rate_limits() -> HashMap<String, serde_json::Value> {
     m
 }
 
+/// Gemini 配额百分比,照 vibeusage 的方式:
+/// 读 Gemini CLI 的 ~/.gemini/oauth_creds.json(只读,凭证归 CLI 所有),
+/// 调 Google 的 retrieveUserQuota 拿每个模型的剩余配额比例。
+/// 过期绝不代刷新——Google 会轮换 refresh_token,代刷会把 CLI 自己的凭证链打断,
+/// 只提示用户跑一次 `gemini` 让 CLI 自己刷。
+fn fetch_gemini_quota() -> serde_json::Value {
+    let Some(home) = dirs::home_dir() else {
+        return serde_json::json!({ "status": "absent" });
+    };
+    let Ok(raw) = fs::read_to_string(home.join(".gemini").join("oauth_creds.json")) else {
+        return serde_json::json!({ "status": "absent" });
+    };
+    let Ok(creds) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return serde_json::json!({ "status": "absent" });
+    };
+    let Some(token) = creds["access_token"].as_str().filter(|t| !t.is_empty()) else {
+        return serde_json::json!({ "status": "absent" });
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    // 留 60s 余量,临期 token 按过期处理
+    if creds["expiry_date"].as_f64().unwrap_or(0.0) <= now_ms + 60_000.0 {
+        return serde_json::json!({ "status": "expired" });
+    }
+
+    let resp = ureq::post("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json(serde_json::json!({}));
+    let quota: serde_json::Value = match resp {
+        Ok(mut r) => match r.body_mut().read_json() {
+            Ok(v) => v,
+            Err(e) => return serde_json::json!({ "status": "error", "message": e.to_string() }),
+        },
+        Err(ureq::Error::StatusCode(401 | 403)) => {
+            return serde_json::json!({ "status": "expired" });
+        }
+        Err(e) => return serde_json::json!({ "status": "error", "message": e.to_string() }),
+    };
+
+    let buckets: Vec<serde_json::Value> = quota["buckets"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|b| {
+                    let model = b["modelId"]
+                        .as_str()
+                        .map(|m| m.rsplit('/').next().unwrap_or(m))
+                        .unwrap_or("");
+                    // remainingFraction 缺省 = 配额全在(0% 已用),与 vibeusage 一致
+                    let remaining = b["remainingFraction"].as_f64().unwrap_or(1.0);
+                    let used = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
+                    serde_json::json!({
+                        "model": model,
+                        "utilization": used.round() as i64,
+                        "resetsAt": b["resetTime"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 订阅档位,拿不到不影响主数据
+    let plan = ureq::post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json(serde_json::json!({}))
+        .ok()
+        .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
+        .and_then(|v| v["currentTier"]["name"].as_str().map(String::from));
+
+    serde_json::json!({
+        "status": "ok",
+        "fetchedAt": now_ms as u64,
+        "plan": plan,
+        "buckets": buckets,
+    })
+}
+
+/// 网络结果缓存 60s:用量 tab 反复开关不至于连环打 Google 接口
+#[tauri::command]
+async fn gemini_quota() -> Result<serde_json::Value, String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static CACHE: OnceLock<Mutex<Option<(Instant, serde_json::Value)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, v)) = guard.as_ref() {
+            if at.elapsed() < Duration::from_secs(60) {
+                return Ok(v.clone());
+            }
+        }
+    }
+    let v = tauri::async_runtime::spawn_blocking(fetch_gemini_quota)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), v.clone()));
+    }
+    Ok(v)
+}
+
 /// 供前端记录/读取轻量状态(比赛配置、清单勾选等存 localStorage,这里暂不需要)
 #[tauri::command]
 fn app_meta() -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("version".into(), env!("CARGO_PKG_VERSION").into());
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 冒烟:跑真实本地日志,人工核对数字(依赖本机数据,CI 上跳过)
+    /// cargo test smoke_usage -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn smoke_usage() {
+        let u = usage_today().expect("usage_today 应能扫描本地日志");
+        println!(
+            "claude 今日: all={} sessions={} files={} models={:?}",
+            u.all,
+            u.sessions,
+            u.scanned_files,
+            u.models
+                .iter()
+                .map(|m| (&m.model, m.tokens))
+                .collect::<Vec<_>>()
+        );
+        for s in &u.sources {
+            println!(
+                "source={} total={} in={} out={} cw={} cr={} sessions={} models={:?}",
+                s.source,
+                s.total,
+                s.input,
+                s.output,
+                s.cache_write,
+                s.cache_read,
+                s.sessions,
+                s.models
+                    .iter()
+                    .map(|m| (&m.model, m.tokens))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let p = collect_profile_stats(7).expect("profile_stats 应能扫描本地日志");
+        println!("7d: tokens={} sessions={} sources: ", p.tokens, p.sessions);
+        for s in &p.sources {
+            println!("  {} total={} sessions={}", s.source, s.total, s.sessions);
+        }
+        // grok 使用频率低,拉一个 90 天宽窗口验证解析器本身
+        let g = collect_grok_usage(
+            chrono::Utc::now().timestamp() - 90 * 86400,
+            SystemTime::now() - Duration::from_secs(90 * 86400),
+        );
+        println!("gemini quota: {}", fetch_gemini_quota());
+        println!(
+            "grok 90d: total={} in={} out={} cr={} sessions={} models={:?}",
+            g.total,
+            g.input,
+            g.output,
+            g.cache_read,
+            g.sessions,
+            g.models
+                .iter()
+                .map(|m| (&m.model, m.tokens))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1385,6 +1843,7 @@ pub fn run() {
             extract_work,
             push_work,
             rate_limits,
+            gemini_quota,
             profile_stats,
             sync_profile,
             github_login,

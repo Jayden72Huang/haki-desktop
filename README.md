@@ -1,48 +1,76 @@
-# HackerTrip 桌面助手
+<div align="center">
 
-黑客松选手的桌面伴侣:比赛日程提醒、Agent 用量统计、参赛过程数据记录。
-用真实的过程数据(token 用量、commit 记录、作品交付)反映一个人的 AI 协作能力。
+<img src="docs/assets/push.gif" alt="Haki 推箱子" height="96" />
 
-## P0 功能清单
+# Haki Desktop
 
-| # | 功能 | 说明 |
-|---|------|------|
-| 1 | 比赛倒计时与阶段提醒 | 提交截止倒计时;比赛时长按「立项→核心功能→打磨→提交材料」划分阶段,落后时提醒;截止前弹出提交材料清单 |
-| 2 | Agent 用量统计 | Claude Code 5 小时/每周额度、重置时间、token 消耗;比赛中提示「额度将在截止前耗尽」 |
-| 3 | Git 提交监控 | 参赛仓库长时间未 commit 时提醒(防止代码丢失);展示当日提交次数 |
-| 4 | 赛事列表与报名提醒 | 新赛事通知;关注赛事后自动生成报名/组队/开赛/提交的提醒链 |
-| 5 | AI 协作能力评估 | 基于真实数据(token 转化效率、工程习惯、参赛交付)计算能力评分,比赛结果为评分背书 |
-| 6 | 赛后数据报告 | 比赛结束自动生成可分享的数据总结图(时长/commit/token/评分变化) |
-| 0 | 账号与数据上报 | 扫小程序码登录;本地脱敏聚合,只上报统计特征,原始代码与对话内容不上传 |
+**黑客松现场的桌面搭子 —— agent 干活他推箱子，该你上场他提醒你。**
 
-## 目录结构
+用真实过程数据（token 用量 · commit 记录 · 作品交付），证明你的 AI 协作能力。
 
-```
-hackertrip-desktop/
-├── app/                  # Tauri 2 桌面应用(vanilla-ts 前端 + Rust 后端)
-│   ├── src/              # 悬浮窗前端(胶囊条 + 展开面板)
-│   └── src-tauri/        # Rust:usage_today 命令解析 ~/.claude 日志
-├── scripts/
-│   └── claude-usage.mjs  # 数据层验证脚本:统计近 N 天 token/会话/费用
-└── prototype/
-    ├── floating-panel.html   # UI 风格原型(4 个状态)
-    └── usage-summary.json    # 真实数据快照(脚本生成)
-```
+[![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB?logo=tauri&logoColor=white)](https://tauri.app)
+[![Platform](https://img.shields.io/badge/macOS-first-000000?logo=apple&logoColor=white)](#快速开始)
+[![Website](https://img.shields.io/badge/官网-hackertrip.space%2Fhaki--desktop-f0557e)](https://hackertrip.space/haki-desktop)
 
-## 开发
+[官网介绍页](https://hackertrip.space/haki-desktop) · [HackerTrip 主站](https://hackertrip.space) · [快速开始](#快速开始)
+
+</div>
+
+---
+
+## 他是谁
+
+Haki 是住在**置顶悬浮条**上的像素小人。你不用点开任何面板——他的动作就是你所有 coding agent 的状态：
+
+| <img src="docs/assets/push.gif" height="80" /> | <img src="docs/assets/switch.gif" height="80" /> | <img src="docs/assets/code.gif" height="80" /> | <img src="docs/assets/sleep.gif" height="80" /> |
+|:---:|:---:|:---:|:---:|
+| **来回推箱子** | **掏出 Switch** | **桌前敲代码** | **就地睡觉** |
+| 日常模式 · agent 干活中 | 日常模式 · 等你确认 | 比赛模式 · 冲刺中 | 比赛模式 · 空闲 |
+
+比赛模式下，Haki 的**水平位置 = 交作品倒计时进度**——他走到哪，比赛就进行到哪。
+
+## 功能一览
+
+| 比赛作战面板 | Token 用量 |
+|:---:|:---:|
+| <img src="docs/assets/console.webp" width="420" /> | <img src="docs/assets/usage.webp" width="420" /> |
+| 倒计时四阶段 · 赛程节点提醒 · 交付清单 · 拖文件夹交作品 | 额度双卡滑动轮播 · 每小时趋势 · 模型/项目分布 |
+| **Haki 赛事问答** | **项目进度** |
+| <img src="docs/assets/qa.webp" width="420" /> | <img src="docs/assets/progress-pushed.webp" width="420" /> |
+| 贴入主办方文档随时提问，CLI 大模型 / 本地检索双路由 | commit 与 push 实时入档，过程数据就是参赛履历 |
+
+- **多 agent 实时监控**：自动发现本机 `claude` / `codex` / `gemini` / `aider` 等进程，session 条给出任务概述、目录、分支、改动量；等确认时状态点变色提醒
+- **多来源用量计量**：Claude / Codex / Grok / Gemini 合并计量，预估费用、缓存、活跃时长、19 家模型公司官方 logo 分布
+- **比赛模式**：比赛名 + 截止时间即可开赛，AI 自动拆赛程节点，临近提醒；材料清单从文档自动推断
+- **项目进度**：绑定参赛仓库，超 45 分钟未 commit 黄色提醒，逐条明细带「已推送 / 未推送」徽标
+
+## 快速开始
 
 ```bash
-# 数据层验证(独立运行,不依赖应用)
-node scripts/claude-usage.mjs --days 30
-
-# 桌面应用开发
-cd app && npm install && npm run tauri dev
+git clone https://github.com/Jayden72Huang/haki-desktop.git
+cd haki-desktop/app
+npm install
+npm run tauri dev
 ```
 
-窗口为无边框、置顶、透明背景的悬浮条,按住任意非按钮区域可拖动,点击展开/收起。
+依赖：Node 18+ · Rust（stable）· macOS（透明置顶窗口依赖 `macOSPrivateApi`）。
 
-## 发布(规划)
+## 技术栈
 
-- 官网分发 DMG(不上 Mac App Store,沙盒会限制读取 `~/.claude` 与 git 仓库)
-- 需要 Apple Developer 账户($99/年)做 Developer ID 签名 + notarization,否则 macOS 15+ 用户无法正常打开
-- 自动更新走 Tauri updater(要求签名构建)
+- **Tauri 2** — 660px 无边框透明置顶悬浮窗
+- **原生 TypeScript**（无框架）+ 手绘像素 sprite（动画位移曲线移植自 [lil-agents](https://github.com/ryanstephen/lil-agents) 的梯形速度模型）
+- **Rust** — agent 进程扫描（`ps`/`lsof`/`git`）、会话日志解析、24 小时分时用量分桶，全部本地执行
+
+## 隐私
+
+所有数据在本机读取与计算（`~/.claude` / `~/.codex` 等会话日志、git 记录）。可选的云端同步只上报**统计特征与仓库名**，源码、对话内容、本地路径不出本机。
+
+## 相关
+
+- 产品介绍页：[hackertrip.space/haki-desktop](https://hackertrip.space/haki-desktop)
+- HackerTrip 一站式黑客松平台：[hackertrip.space](https://hackertrip.space)
+- 早期产品规划：[docs/PLAN.md](docs/PLAN.md)
+
+---
+
+<div align="center"><sub>Haki by <a href="https://hackertrip.space">HackerTrip</a> · 用真实过程数据，证明你的 AI 协作能力</sub></div>

@@ -16,20 +16,24 @@
 
     <!-- 收起态:胶囊条 -->
     <div id="pill" class="pill" data-tauri-drag-region>
-      <span class="chev" data-tauri-drag-region>›</span>
-      <img class="brand-logo" src="/src/assets/logo.png" alt="" data-tauri-drag-region />
-      <span class="title" id="pill-title" data-tauri-drag-region>HackerTrip</span>
+      <span class="brand-zone" id="pill-brand" title="展开面板">
+        <span class="chev">›</span>
+        <img class="brand-logo" src="/src/assets/logo.png" alt="" />
+        <span class="title" id="pill-title">HackerTrip</span>
+      </span>
       <span class="spacer" data-tauri-drag-region></span>
       <span class="badge mono" id="pill-main" data-tauri-drag-region>—</span>
       <span class="badge green" id="pill-status" data-tauri-drag-region>读取中</span>
     </div>
 
     <!-- 展开态:面板 -->
-    <div id="panel" class="panel hidden">
-      <div class="panel-header">
-        <span class="chev" id="collapse-btn">⌄</span>
-        <img class="brand-logo" src="/src/assets/logo.png" alt="" data-tauri-drag-region />
-        <span class="title" data-tauri-drag-region>HackerTrip</span>
+    <div id="panel" class="panel hidden" data-tauri-drag-region>
+      <div class="panel-header" data-tauri-drag-region>
+        <span class="brand-zone" id="panel-brand" title="收起面板">
+          <span class="chev" id="collapse-btn">⌄</span>
+          <img class="brand-logo" src="/src/assets/logo.png" alt="" />
+          <span class="title">HackerTrip</span>
+        </span>
         <span class="spacer" data-tauri-drag-region></span>
         <div class="seg" id="mode-seg">
           <button class="seg-btn" data-mode="daily">日常</button>
@@ -38,7 +42,7 @@
       </div>
 
       <!-- 网站入口(浏览器打开) -->
-      <div class="tabs">
+      <div class="tabs" data-tauri-drag-region>
         <button class="tab" data-url="https://hackertrip.space/explore">赛事 ↗</button>
         <button class="tab" data-url="https://hackertrip.space/dashboard">我的 ↗</button>
         <button class="tab" data-url="https://hackertrip.space/guides">指南 ↗</button>
@@ -47,11 +51,12 @@
         <button class="tab" id="tab-settings">设置</button>
       </div>
 
-      <div id="panel-body">
+      <div id="panel-body" data-tauri-drag-region>
 
       <!-- ============ Token 用量 ============ -->
       <div id="usage-view" class="hidden">
         <div class="quota-grid" id="u-quota"><div class="row"><span class="sub">读取额度中…</span></div></div>
+        <div class="quota-pager hidden" id="u-quota-pager"><span id="qp-dots"></span></div>
         <div class="usage-divider"></div>
         <div class="range-tabs" id="u-range">
           <button class="range-btn" data-range="today">今天</button>
@@ -60,6 +65,16 @@
           <button class="range-btn" data-range="90">90D</button>
         </div>
         <div class="stat-grid" id="u-stats"></div>
+        <!-- 今日分时用量柱状图(仅"今天"范围显示) -->
+        <div class="dist-card hidden" id="u-hourly-card">
+          <div class="dist-head">
+            <span class="dist-title">每小时趋势</span>
+            <span class="spacer"></span>
+            <span class="sub mono" id="u-hourly-max">—</span>
+          </div>
+          <div class="hour-chart" id="u-hourly"></div>
+          <div class="hour-axis mono"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span></div>
+        </div>
         <div class="dist-card">
           <div class="dist-head">
             <span class="dist-title">用量分布</span>
@@ -99,6 +114,28 @@
         <div class="row hidden" id="s-qr-row">
           <img id="s-qr" class="qr" alt="绑定二维码" />
           <span class="sub">用小程序里的「扫码绑定」扫这个码,也可以手动输入左上方 6 位数字</span>
+        </div>
+        <div class="section-title">Haki 问答引擎(比赛模式)</div>
+        <div class="row">
+          <span class="label">Claude Code</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-cli-claude">检测中…</span>
+          <button class="action ghost" data-open-url="https://claude.com/claude-code">安装指引 ↗</button>
+        </div>
+        <div class="row">
+          <span class="label">Codex CLI</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-cli-codex">检测中…</span>
+          <button class="action ghost" data-open-url="https://developers.openai.com/codex/cli">安装指引 ↗</button>
+        </div>
+        <div class="row">
+          <span class="label">Gemini CLI</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-cli-gemini">检测中…</span>
+          <button class="action ghost" data-open-url="https://github.com/google-gemini/gemini-cli">安装指引 ↗</button>
+        </div>
+        <div class="row">
+          <span class="sub">装有 CLI 时 Haki 用大模型答疑,没有则用本地文档检索(问答目前接入 Claude Code,其余接入中)</span>
         </div>
         <div class="section-title">Agent 列表显示字段</div>
         <div id="field-toggles"></div>
@@ -162,10 +199,14 @@
             <input id="ev-name" type="text" placeholder="比赛名称,如 AdventureX 2026" />
           </div>
           <div class="form-row">
-            <label class="sub">开始</label>
-            <input id="ev-start" type="datetime-local" />
             <label class="sub">提交截止</label>
             <input id="ev-end" type="datetime-local" />
+          </div>
+          <div class="form-row" id="ev-end-quick">
+            <button class="chip" data-days="0">今晚 24:00</button>
+            <button class="chip" data-days="1">明天 18:00</button>
+            <button class="chip" data-days="3">3 天后 18:00</button>
+            <button class="chip" data-days="7">一周后 18:00</button>
           </div>
           <div class="form-row">
             <textarea
@@ -193,20 +234,61 @@
             </div>
           </div>
 
-          <!-- 赛程节点(由主办方文档解析而来) -->
-          <div class="section-title" id="h-milestones-title">
-            赛程节点
-            <span class="sub link" id="h-replan">重新规划</span>
-          </div>
-          <div id="h-milestones"></div>
-
           <!-- 交作品:内嵌 toggle,不另开窗口 -->
-          <div class="submit-block">
+                    <div class="module-block" data-key="qa">
+            <div class="row toggle-head" data-mod="qa">
+              <span class="icon" style="background: rgba(139, 79, 232, 0.22)">✦</span>
+              <span class="label strong">Haki 提问</span>
+              <span class="sub" id="qa-tips">token 在哪领?交作品到哪?随时问</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="qa-chev">›</span>
+            </div>
+            <div id="qa-body" class="hidden">
+              <div class="form-row">
+                <input id="h-ask" type="text" placeholder="赞助商 token 在哪领?作品交到哪?" />
+                <button class="action ghost" id="h-ask-go">问</button>
+              </div>
+              <div id="h-ask-out" class="summary hidden"></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-key="ms">
+            <div class="row toggle-head" data-mod="ms">
+              <span class="icon" style="background: rgba(77, 225, 255, 0.14)">◷</span>
+              <span class="label strong">赛程节点</span>
+              <span class="sub" id="ms-tips">—</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="ms-chev">›</span>
+            </div>
+            <div id="ms-body" class="hidden">
+              <div id="h-milestones"></div>
+              <div class="row"><span class="spacer"></span><span class="sub link" id="h-replan">重新规划</span></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-key="cl">
+            <div class="row toggle-head" data-mod="cl">
+              <span class="icon" style="background: rgba(46, 216, 136, 0.14)">✓</span>
+              <span class="label strong">交付清单</span>
+              <span class="sub" id="cl-tips">—</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="cl-chev">›</span>
+            </div>
+            <div id="cl-body" class="hidden">
+              <div id="checklist"></div>
+            </div>
+          </div>
+
+          <div class="submit-block" data-key="work">
             <div class="row toggle-head" id="work-toggle">
               <span class="icon" style="background: rgba(124, 93, 255, 0.22)">⇪</span>
               <span class="label strong">交作品</span>
               <span class="sub" id="work-hint">把项目文件夹拖进来自动提取</span>
               <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
               <span class="chev-sm" id="work-chev">›</span>
             </div>
             <div id="work-body" class="hidden">
@@ -249,29 +331,46 @@
             </div>
           </div>
 
-          <!-- 赛事问答:只在参赛模式出现 -->
-          <div class="section-title">问一下</div>
-          <div class="form-row">
-            <input id="h-ask" type="text" placeholder="赞助商 token 在哪领?作品交到哪?" />
-            <button class="action ghost" id="h-ask-go">问</button>
+          <div class="module-block" data-key="repo">
+            <div class="row toggle-head" data-mod="repo">
+              <span class="icon" style="background: rgba(248, 150, 74, 0.16)">⇅</span>
+              <span class="label strong">项目进度</span>
+              <span class="sub" id="repo-tips">绑定仓库后展示真实 commit/push</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="repo-chev">›</span>
+            </div>
+            <div id="repo-body" class="hidden">
+              <div class="row">
+                <span class="sub">绑定参赛仓库,commit 与 push 记录实时入档</span>
+                <span class="spacer"></span>
+                <span class="sub link" id="h-repo-bind">绑定仓库</span>
+              </div>
+              <div id="h-repo-bindbox" class="hidden">
+                <div class="form-row">
+                  <select id="h-repo-select"></select>
+                  <button class="action" id="h-repo-save">绑定</button>
+                </div>
+              </div>
+              <div id="h-repo-box">
+                <div class="row">
+                  <span class="icon" style="background: rgba(255, 255, 255, 0.08)">✳</span>
+                  <span class="label">本场 Agent 用量</span>
+                  <span class="spacer"></span>
+                  <span class="sub mono" id="h-tokens">—</span>
+                </div>
+                <div class="row">
+                  <span class="icon check" id="h-commit-icon">✓</span>
+                  <span class="label" id="h-repo-name">最近 commit</span>
+                  <span class="sub" id="h-commit">—</span>
+                  <span class="spacer"></span>
+                  <span class="badge mono" id="h-commit-count">—</span>
+                </div>
+                <div id="h-commits"></div>
+              </div>
+            </div>
           </div>
-          <div id="h-ask-out" class="summary hidden"></div>
 
-          <div class="row">
-            <span class="icon" style="background: rgba(255, 255, 255, 0.08)">✳</span>
-            <span class="label">本场 Agent 用量</span>
-            <span class="spacer"></span>
-            <span class="sub mono" id="h-tokens">—</span>
-          </div>
-          <div class="row">
-            <span class="icon check" id="h-commit-icon">✓</span>
-            <span class="label">最近 commit</span>
-            <span class="sub" id="h-commit">—</span>
-            <span class="spacer"></span>
-            <span class="badge mono" id="h-commit-count">—</span>
-          </div>
-          <div class="section-title">提交材料清单</div>
-          <div id="checklist"></div>
           <div class="row">
             <span class="sub link" id="ev-edit">修改比赛信息</span>
             <span class="spacer"></span>

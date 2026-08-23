@@ -915,3 +915,226 @@ textarea:focus {
 .hint-error {
   color: var(--urgent) !important;
 }
+
+/* 展开/收起热区:箭头+logo+标题整块可点,不带拖拽属性保证点击必达 */
+.brand-zone {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+  /* 负 margin + padding 外扩热区,视觉不变、可点面积更大 */
+  margin: -8px -6px;
+  padding: 8px 6px;
+  border-radius: 10px;
+}
+.brand-zone:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.brand-zone:hover .chev {
+  color: var(--text);
+}
+
+/* ============ 用量:每小时趋势柱状图 ============ */
+.hour-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 76px;
+  padding-top: 8px;
+}
+.hbar-wrap {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.hbar {
+  width: 100%;
+  border-radius: 2px 2px 0 0;
+  background: linear-gradient(180deg, #f0557e, #8b4fe8);
+  transition: height 0.3s ease;
+}
+.hour-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--mut);
+}
+
+/* ---------- 截止时间快捷 chips(移植自 Haki 仓比赛功能) ---------- */
+.chip {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--sub);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover {
+  border-color: rgba(139, 79, 232, 0.5);
+  color: var(--text);
+}
+.chip.active {
+  background: rgba(139, 79, 232, 0.2);
+  border-color: rgba(139, 79, 232, 0.6);
+  color: var(--purple-text);
+}
+
+/* 问答降级引导条 */
+.qa-guide {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  color: var(--mut);
+}
+.qa-guide .link {
+  color: var(--purple-text);
+  cursor: pointer;
+}
+.qa-guide .link:hover {
+  text-decoration: underline;
+}
+
+/* 额度卡分页器:一次两家,圆点+箭头切换 */
+.quota-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: -4px 0 10px;
+}
+.qp-arrow {
+  border: none;
+  background: transparent;
+  color: var(--mut);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 8px;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.qp-arrow:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.qp-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sunken);
+  margin: 0 3px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.qp-dot.on {
+  background: var(--purple);
+  box-shadow: 0 0 6px rgba(139, 79, 232, 0.6);
+}
+
+/* 额度卡改横向滑动轮播:一屏 2 张,trackpad 左右滑/鼠标拖拽,滚动条隐藏 */
+.quota-grid {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  cursor: grab;
+}
+.quota-grid::-webkit-scrollbar {
+  display: none;
+}
+.quota-grid:active {
+  cursor: grabbing;
+}
+.quota-grid .quota-card {
+  flex: 0 0 calc(50% - 5px);
+  scroll-snap-align: start;
+}
+
+/* 视图开启态的 tab 高亮再明显一点:品牌渐变描边 + 亮字 */
+.tab.active {
+  color: #fff;
+  font-weight: 600;
+  background: rgba(139, 79, 232, 0.28);
+  border-color: rgba(139, 79, 232, 0.9);
+  box-shadow: 0 0 10px rgba(139, 79, 232, 0.35);
+}
+
+/* 项目进度:commit/push 明细行 */
+.commit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 2px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.05);
+  font-size: 12px;
+}
+.commit-row:last-child {
+  border-bottom: none;
+}
+.commit-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn-yellow);
+  flex: none;
+}
+.commit-dot.pushed {
+  background: var(--success);
+}
+.commit-msg {
+  flex: 1;
+  color: var(--sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-row .badge {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+#h-repo-select {
+  flex: 1;
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+/* 比赛面板统一模块块:与交作品同一套折叠格式 */
+.module-block {
+  margin-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 4px;
+}
+
+/* 模块拖动排序把手 */
+.mod-drag {
+  color: var(--mut);
+  font-size: 11px;
+  letter-spacing: -2px;
+  padding: 2px 6px;
+  cursor: grab;
+  user-select: none;
+  flex: none;
+}
+.mod-drag:hover {
+  color: var(--text);
+}
+.mod-dragging {
+  opacity: 0.55;
+  background: rgba(139, 79, 232, 0.08);
+  border-radius: 12px;
+}
+.mod-dragging .mod-drag {
+  cursor: grabbing;
+}

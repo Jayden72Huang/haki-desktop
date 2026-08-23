@@ -7,7 +7,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import QRCode from "qrcode";
-import { initHaki, setHakiInputs } from "./haki";
+import { initHaki, setHakiInputs, setHakiPaused } from "./haki";
 
 /* ---------- 类型 ---------- */
 interface ProjectToday {
@@ -43,6 +43,8 @@ interface UsageToday {
   per_project: ProjectToday[];
   models: ModelStat[];
   sources: SourceUsage[];
+  /// 今日分时用量:本地时区 24 小时分桶,含全部来源
+  hourly?: number[];
 }
 interface AgentProc {
   agent: string;
@@ -95,6 +97,8 @@ interface HackEvent {
   end: string; // ISO
   doc?: string; // 主办方文档原文,问答时作为上下文
   milestones?: Milestone[];
+  /// 从主办方文档推断出的提交材料清单(没有文档则用默认三件套)
+  checklist?: string[];
 }
 interface WorkDraft {
   name: string;
@@ -206,6 +210,7 @@ async function refreshUsage() {
   try {
     usage = await invoke<UsageToday>("usage_today");
     repos = await invoke<RepoToday[]>("dev_today", { paths: usage.projects });
+    void refreshRepoCommits();
   } catch (e) {
     console.error(e);
   }
@@ -389,7 +394,11 @@ function render() {
   document.querySelectorAll<HTMLButtonElement>(".seg-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.mode === mode);
   });
+  // 打开的视图对应按钮高亮,文案变「✕」提示可关闭返回
   $("tab-usage").classList.toggle("active", showUsage);
+  $("tab-usage").textContent = showUsage ? "用量 ✕" : "用量";
+  $("tab-settings").classList.toggle("active", showSettings);
+  $("tab-settings").textContent = showSettings ? "设置 ✕" : "设置";
   if (showUsage) renderUsage();
   if (!overlay) {
     if (mode === "daily") renderDaily();
@@ -516,7 +525,7 @@ function renderUsage() {
               ? "配额接口请求失败"
               : "未检测到 Gemini CLI 凭证",
         );
-  $("u-quota").innerHTML = [
+  const quotaCards = [
     `<div class="quota-card">
       <div class="qhead"><span class="logo-tile">${agentLogo("codex")}</span><span class="qname">Codex</span>
         ${cx?.resetCreditsCount ? `<span class="badge warn">重置券 ×${cx.resetCreditsCount}</span>` : ""}
@@ -542,7 +551,18 @@ function renderUsage() {
         ${gm?.plan ? `<span class="badge mono">${esc(gm.plan)}</span>` : ""}</div>
       ${gmBody}
     </div>`,
-  ].join("");
+  ];
+  // 一次可视 2 家,横向滑动查看更多;重渲染时保住滚动位置
+  const qEl = $("u-quota");
+  const keepScroll = qEl.scrollLeft;
+  qEl.innerHTML = quotaCards.join("");
+  qEl.scrollLeft = keepScroll;
+  const qPages = Math.max(1, quotaCards.length - 1);
+  $("u-quota-pager").classList.toggle("hidden", qPages <= 1);
+  const qMax = Math.max(1, qEl.scrollWidth - qEl.clientWidth);
+  const qCur = Math.min(qPages - 1, Math.round((qEl.scrollLeft / qMax) * (qPages - 1)));
+  $("qp-dots").innerHTML = Array.from({ length: qPages }, (_, i) =>
+    `<span class="qp-dot ${i === qCur ? "on" : ""}" data-page="${i}"></span>`).join("");
 
   // ── 时间范围 ──
   document.querySelectorAll<HTMLButtonElement>("#u-range .range-btn").forEach((b) => {
@@ -573,6 +593,22 @@ function renderUsage() {
       stat("缓存 Token", fmt(cacheRead)),
       stat("活跃时长", fmtMinutes(activeMin), "blue"),
     ].join("");
+  }
+
+  // ── 每小时趋势:今日分时用量柱状图(仅"今天"范围有分时数据) ──
+  const hourly = usage?.hourly ?? [];
+  const showHourly = usageRange === "today" && hourly.some((v) => v > 0);
+  $("u-hourly-card").classList.toggle("hidden", !showHourly);
+  if (showHourly) {
+    const max = Math.max(...hourly);
+    $("u-hourly-max").textContent = `峰值 ${fmt(max)}`;
+    $("u-hourly").innerHTML = hourly
+      .map(
+        (v, h) =>
+          `<div class="hbar-wrap" title="${String(h).padStart(2, "0")}:00 · ${fmt(v)} tokens">` +
+          `<div class="hbar" style="height:${v ? Math.max(6, Math.round((v / max) * 100)) : 0}%"></div></div>`,
+      )
+      .join("");
   }
 
   // ── 用量分布:模型 / 项目 ──
@@ -905,6 +941,7 @@ function renderHackathon() {
     ? `${fmt(usageTotal(usage))} tokens · ${usageSessions(usage)} 会话`
     : "—";
   renderMilestones();
+  $("ms-tips").textContent = nm ? `下一步:${nm.title}` : "节点已全部走完";
 
   // 阶段进度
   const start = new Date(event.start).getTime();
@@ -918,26 +955,72 @@ function renderHackathon() {
     return `<div class="phase ${cls}"><div class="bar"></div><div class="name">${ph.name}</div></div>`;
   }).join("");
 
-  // commit 状态(取今天 commit 最多的仓库)
-  const top = repos[0];
+  // 项目进度:优先用手动绑定的仓库,没绑则退回今天 commit 最多的仓库
+  const bound = store.get<string>("raceRepo", "");
+  const top = repos.find((r) => r.path === bound) ?? repos[0];
+  $("h-repo-bind").textContent = bound ? "换绑仓库" : "绑定仓库";
+  $("repo-tips").textContent = top
+    ? `${top.name} · 今日 ${top.commits_today} 次${top.unpushed ? ` · ${top.unpushed} 未推` : ""}`
+    : "绑定仓库后展示真实 commit/push";
+  $("h-repo-name").textContent = top ? top.name : "最近 commit";
   if (top && top.last_commit_min !== null) {
     const min = top.last_commit_min;
-    $("h-commit").textContent = `${min < 60 ? `${min} 分钟前` : `${Math.floor(min / 60)} 小时前`} · ${top.name}`;
-    $("h-commit-count").textContent = `今日 ${top.commits_today} 次`;
+    $("h-commit").textContent = `${min < 60 ? `${min} 分钟前` : `${Math.floor(min / 60)} 小时前`} · ${esc(top.last_message).slice(0, 24)}`;
+    $("h-commit-count").textContent = `今日 ${top.commits_today} 次${top.unpushed ? ` · ${top.unpushed} 未推` : " · 已全部推送"}`;
     const icon = $("h-commit-icon");
     icon.className = min > 45 ? "icon warn" : "icon check";
     icon.textContent = min > 45 ? "!" : "✓";
   } else {
-    $("h-commit").textContent = "暂无记录";
+    $("h-commit").textContent = bound ? "该仓库今天暂无 commit" : "暂无记录,可绑定仓库";
     $("h-commit-count").textContent = "—";
   }
+  // commit/push 明细列表(需后端 repo_commits 命令,没有则只显示上面的汇总行)
+  $("h-commits").innerHTML = repoCommits.length
+    ? repoCommits
+        .map((c) => {
+          const t = new Date(c.ts);
+          const pad = (n: number) => String(n).padStart(2, "0");
+          return `<div class="commit-row">
+            <span class="commit-dot ${c.pushed ? "pushed" : ""}"></span>
+            <span class="sub mono">${pad(t.getHours())}:${pad(t.getMinutes())}</span>
+            <span class="commit-msg">${esc(c.message)}</span>
+            <span class="badge mono ${c.pushed ? "green" : "yellow"}">${c.pushed ? "已推送" : "未推送"}</span>
+          </div>`;
+        })
+        .join("")
+    : "";
 
   renderChecklist();
 }
 
+/* ---------- 项目进度:绑定仓库的 commit/push 明细 ---------- */
+interface RepoCommit {
+  ts: string;
+  message: string;
+  pushed: boolean;
+}
+let repoCommits: RepoCommit[] = [];
+
+/// 拉绑定仓库的 commit 明细。后端还没有 repo_commits 命令时静默降级(只显示汇总行)
+async function refreshRepoCommits() {
+  const bound = store.get<string>("raceRepo", "") || repos[0]?.path;
+  if (!bound || mode !== "hackathon" || !event) {
+    repoCommits = [];
+    return;
+  }
+  try {
+    repoCommits = await invoke<RepoCommit[]>("repo_commits", { path: bound, limit: 8 });
+  } catch {
+    repoCommits = [];
+  }
+  if (expanded && mode === "hackathon") render();
+}
+
 function renderChecklist() {
-  const checked = store.get<boolean[]>("checklist", DEFAULT_CHECKLIST.map(() => false));
-  $("checklist").innerHTML = DEFAULT_CHECKLIST.map(
+  const items = event?.checklist ?? DEFAULT_CHECKLIST;
+  const checked = store.get<boolean[]>("checklist", items.map(() => false));
+  $("cl-tips").textContent = `已完成 ${checked.filter(Boolean).length}/${items.length}`;
+  $("checklist").innerHTML = items.map(
     (item, i) => `
     <div class="row check-item" data-i="${i}">
       <span class="icon ${checked[i] ? "check" : "dots"}">${checked[i] ? "✓" : "⠿"}</span>
@@ -955,29 +1038,102 @@ function renderChecklist() {
   });
 }
 
+function inferChecklist(doc: string): string[] {
+  const d = doc.toLowerCase();
+  const items: string[] = [];
+
+  // 逐个判断交付物关键词,有就加对应条目(保持"提交 GitHub 仓库 → PPT → Demo"顺序)
+  if (/github|仓库|repo|代码|源码|git/.test(d)) items.push("提交 GitHub 代码仓库");
+  if (/ppt|路演|答辩|演讲|slides|演示文稿/.test(d)) items.push("路演 PPT 2 分钟准备");
+  if (/demo|视频|录屏|展示|demo视频|演示视频/.test(d)) items.push("路演视频 Demo 一份");
+
+  // 文档没提供任何线索 → 默认 3 条
+  if (items.length === 0) return [...DEFAULT_CHECKLIST];
+
+  // 补全缺失的默认项(文档可能只提了其中一两个)
+  for (const def of DEFAULT_CHECKLIST) {
+    if (!items.includes(def)) items.push(def);
+  }
+  // 保持原始顺序
+  return DEFAULT_CHECKLIST.filter((c) => items.includes(c));
+}
+
+/// 把用户输入的时间文本解析成 ISO 字符串(本地时区)。支持:
+///   「8月25日 18:00」「8.25 18:00」「明天 18:00」「今天 09:00」「18:00」「2026-08-25T18:00」
+/// 解析失败返回 null。
+function parseDateInput(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+
+  // 已经是 ISO 格式(含 T),直接补秒返回
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
+  const now = new Date();
+  const hhmm = s.match(/(\d{1,2})[:：](\d{2})/); // 时间
+  const h = hhmm ? Number(hhmm[1]) : 0;
+  const m = hhmm ? Number(hhmm[2]) : 0;
+
+  let day: Date;
+  // 「今天/明天」相对日
+  if (/明天/.test(s)) {
+    day = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  } else if (/今天|现在/.test(s)) {
+    day = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else {
+    // 「M月D日」或「M.D」绝对日
+    const md = s.match(/(\d{1,2})月\s*(\d{1,2})日?/) || s.match(/(\d{1,2})\.(\d{1,2})/);
+    if (md) {
+      const mon = Number(md[1]) - 1;
+      const dd = Number(md[2]);
+      day = new Date(now.getFullYear(), mon, dd);
+    } else if (hhmm) {
+      // 只给了时间,默认今天
+      day = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    } else {
+      return null;
+    }
+  }
+
+  day.setHours(h, m, 0, 0);
+  if (Number.isNaN(day.getTime())) return null;
+  return day.toISOString();
+}
+
+/// ISO → datetime-local 控件值(本地时区 YYYY-MM-DDTHH:mm),「修改比赛信息」回填用
+function toLocalInputValue(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 async function saveEvent() {
   const name = ($("ev-name") as HTMLInputElement).value.trim();
-  const start = ($("ev-start") as HTMLInputElement).value;
-  const endInput = $("ev-end") as HTMLInputElement;
-  const end = endInput.value;
+  const endRaw = ($("ev-end") as HTMLInputElement).value;
   const doc = ($("ev-doc") as HTMLTextAreaElement)?.value.trim() ?? "";
-  // 之前校验不过就静默 return,看起来像「按钮点不动」。WKWebView 的 datetime-local
-  // 分段没填完时 .value 为空串(界面上却像填了),必须把原因说出来
+
+  const end = parseDateInput(endRaw);
   const hint = $("ev-plan-hint");
   if (!name || !end) {
+    // WKWebView 的 datetime-local 分段没填完时 .value 为空串(界面上却像填了)
     hint.textContent = !name
       ? "请先填写比赛名称"
-      : endInput.validity?.badInput
-        ? "截止时间没填完整(日期和上午/下午时间每段都要选)"
-        : "请填写提交截止时间";
+      : ($("ev-end") as HTMLInputElement).validity?.badInput
+        ? "截止时间没填完整(每一段都要选),或点上面的快捷按钮"
+        : "请选择提交截止时间,或点上面的快捷按钮";
     hint.classList.add("hint-error");
     return;
   }
   hint.textContent = "";
   hint.classList.remove("hint-error");
-  event = { name, start: start || new Date().toISOString(), end, doc };
+
+  const checklist = inferChecklist(doc);
+  event = { name, start: new Date().toISOString(), end, doc, checklist };
   store.set("event", event);
-  store.set("checklist", DEFAULT_CHECKLIST.map(() => false));
+  store.set("checklist", checklist.map(() => false));
   notifiedMilestones.clear();
   store.set("notified_ms", []);
   hakiSync();
@@ -985,7 +1141,136 @@ async function saveEvent() {
   await planMilestones();
 }
 
-/* ---------- 赛事问答 ---------- */
+/* ---------- 赛事问答(本地检索,不调大模型) ---------- */
+
+/// FAQ 意图:问题里出现 kw 中的词 → 触发,在文档里找含 search 词的句子
+interface FaqIntent {
+  kw: string[];
+  search: string[];
+}
+const FAQ_INTENTS: FaqIntent[] = [
+  { kw: ["token", "api", "key", "密钥", "额度", "赞助", "领取", "领用", "接入"], search: ["token", "api", "key", "密钥", "额度", "赞助", "领"] },
+  { kw: ["提交", "交作品", "截止", "deadline", "上传", "作品"], search: ["提交", "截止", "上传", "作品", "交"] },
+  { kw: ["签到", "入场", "地点", "地址", "在哪", "哪里", "现场", "路线"], search: ["签到", "入场", "地点", "地址", "现场", "馆", "楼", "路线"] },
+  { kw: ["组队", "报名", "队伍", "队友", "注册"], search: ["组队", "报名", "队伍", "注册"] },
+  { kw: ["微信", "联系", "群", "主办", "官方", "客服", "咨询", "二维码"], search: ["微信", "联系", "群", "主办", "客服", "咨询", "二维码"] },
+  { kw: ["路演", "演示", "答辩", "评审"], search: ["路演", "演示", "答辩", "评审"] },
+  { kw: ["时间", "几点", "什么时候", "日程", "安排"], search: ["时间", "日程", "安排"] },
+];
+
+/// 把文档切成句子(按换行/标点)
+function splitDocSentences(doc: string): string[] {
+  return doc
+    .split(/[\n\r;；。!！?？]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/// 判断句子是不是「章节标题噪声」:去掉编号后是很短的短语、且没有句尾标点
+/// 例:「4. 交通与入场」「三、参赛须知」→ true;「地点在XX大厦3楼」→ false
+function isHeadingNoise(s: string): boolean {
+  const body = s.replace(/^\s*[\d一二三四五六七八九十百]+[.、)）:：]\s*/, "").trim();
+  if (!body) return true; // 纯编号
+  // 剩余很短(<12 字)且无句末标点 → 当作标题,不作为答案返回
+  return body.length <= 12 && !/[。！？!?；;]$/.test(s);
+}
+
+/// 从文档或节点里抽主办方联系方式(微信/群/电话),兜底话术用
+function extractContact(doc: string, milestones: Milestone[]): string | null {
+  const pool = splitDocSentences(doc).concat(
+    (milestones ?? []).flatMap((m) => [m.title, m.action])
+  );
+  for (const s of pool) {
+    const m = s.match(/(微信|vx|weixin|群|电话|手机|tel|二维码)[:：]?\s*[^\s,，;；。]{2,30}/i);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+/// 本地检索:在预埋文档 + 已排节点里找答案。找到返回答案,找不到返回 null。
+/// 策略:先意图命中(结构化、快),再按「句子与问题重合度」打分取最优,文档确实没有才兜底。
+function searchDocLocally(q: string): string | null {
+  const doc = event?.doc ?? "";
+  const milestones = event?.milestones ?? [];
+  const ql = q.toLowerCase();
+
+  // 文档句子 + 节点文本(标题 + 动作)都作为可检索池
+  const docSentences = splitDocSentences(doc);
+  const nodeTexts: string[] = milestones.flatMap((m) => [
+    `${m.title} ${m.action}`,
+    `${m.at} ${m.title}`,
+  ]);
+
+  // 过滤掉章节标题类噪声(如「4. 交通与入场」),避免把无头标题当答案返回
+  const isClean = (s: string) => !isHeadingNoise(s);
+
+  // 问题里抽出的检索词(去掉停用词、非空)
+  const stop = new Set(["请问", "怎么", "如何", "哪里", "在哪", "什么", "多少", "几点", "什么时候", "帮我", "一下", "可以", "能", "不", "我", "我们", "需要", "请", "问", "的", "吗", "呢", "啊", "是", "有", "要", "一下"]);
+  const qTokens = [...new Set(
+    ql
+      .replace(/[，。！？、：:；;,.!?()（）]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length >= 2 && !stop.has(w))
+  )];
+
+  // 给候选句子打分:命中一个检索词 +1,命中意图检索词额外 +2
+  const scoreOf = (s: string): number => {
+    const sl = s.toLowerCase();
+    if (!isClean(s)) return -1; // 标题噪声直接淘汰
+    let score = 0;
+    for (const t of qTokens) {
+      if (sl.includes(t)) score += 1;
+    }
+    // 意图命中额外加权
+    const hit = FAQ_INTENTS.find((it) => it.kw.some((k) => ql.includes(k)));
+    if (hit) {
+      for (const sw of hit.search) {
+        if (sl.includes(sw.toLowerCase())) score += 2;
+      }
+    }
+    return score;
+  };
+
+  // 节点文本(结构化,最相关)优先,其次文档句子
+  const pool: { s: string; score: number }[] = [
+    ...nodeTexts.map((s) => ({ s, score: scoreOf(s) })),
+    ...docSentences.map((s) => ({ s, score: scoreOf(s) })),
+  ];
+
+  const best = pool
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)[0];
+
+  return best?.s ?? null;
+}
+
+/// 兜底话术:文档里没写时的统一提示
+function fallbackAnswer(): string {
+  const contact = extractContact(event?.doc ?? "", event?.milestones ?? []);
+  if (contact) {
+    return `文档里没写这个。可联系主办方:${contact}`;
+  }
+  return "文档里没写这个,请咨询主办方(群里 @ 主办方或添加微信)。";
+}
+
+/// CLI 问答可用性缓存:"ok" 用过且成功;"missing" 探测过没装;无值则未知(会先试一次)
+function cliQaState(): string {
+  return store.get<string>("cliQa", "");
+}
+
+function guideHtml(): string {
+  return `<div class="qa-guide">没装 coding agent CLI,当前用本地文档检索回答。<span class="link" id="qa-goto-settings">安装 CLI 解锁智能问答 →</span></div>`;
+}
+
+function bindGuideLink(out: HTMLElement) {
+  out.querySelector<HTMLElement>("#qa-goto-settings")?.addEventListener("click", () => {
+    showSettings = true;
+    showUsage = false;
+    renderFieldToggles();
+    render();
+  });
+}
+
 async function askHackathon() {
   if (!event) return;
   const input = $("h-ask") as HTMLInputElement;
@@ -993,20 +1278,37 @@ async function askHackathon() {
   if (!q) return;
   const out = $("h-ask-out");
   out.classList.remove("hidden");
-  out.textContent = "本地 CLI 思考中…";
-  await fitWindow();
-  try {
-    const ans = await invoke<string>("ask_hackathon", {
-      question: q,
-      name: event.name,
-      doc: event.doc ?? "",
-      milestones: JSON.stringify(event.milestones ?? []),
-    });
-    out.textContent = ans;
-    input.value = "";
-  } catch (e) {
-    out.textContent = `问失败:${String(e).slice(0, 160)}`;
+
+  // 有 claude 在跑必然装了 CLI;标记过 missing 且没看到 CLI 进程就不再白试
+  const claudeRunning = agents.some((a) => a.agent === "claude");
+  const tryCli = cliQaState() !== "missing" || claudeRunning;
+
+  if (tryCli) {
+    out.textContent = "Haki 思考中…";
+    await fitWindow();
+    try {
+      const ans = await invoke<string>("ask_hackathon", {
+        question: q,
+        name: event.name,
+        doc: event.doc ?? "",
+        milestones: JSON.stringify(event.milestones ?? []),
+      });
+      store.set("cliQa", "ok");
+      out.textContent = ans;
+      input.value = "";
+      await fitWindow();
+      return;
+    } catch (e) {
+      // 没装 CLI → 记住,之后直接走本地检索;其他错误(超时/额度)本次也降级
+      if (String(e).includes("确认已安装")) store.set("cliQa", "missing");
+    }
   }
+
+  // 本地检索兜底:FAQ 意图 + 句子打分,秒回
+  const hit = searchDocLocally(q);
+  out.innerHTML = `${esc(hit ?? fallbackAnswer())}${cliQaState() === "missing" ? guideHtml() : ""}`;
+  bindGuideLink(out);
+  input.value = "";
   await fitWindow();
 }
 
@@ -1262,6 +1564,7 @@ async function syncNow(silent: boolean) {
 /* ---------- 展开/收起 ---------- */
 async function setExpanded(next: boolean) {
   expanded = next;
+  setHakiPaused(next); // 面板展开时小人定格,收起后继续动
   $("pill").classList.toggle("hidden", expanded);
   $("panel").classList.toggle("hidden", !expanded);
   render();
@@ -1290,7 +1593,8 @@ window.addEventListener("DOMContentLoaded", () => {
     if ((e.target as HTMLElement).closest(".badge")) return;
     void setExpanded(true);
   });
-  $("collapse-btn").addEventListener("click", () => void setExpanded(false));
+  // 展开/收起热区 = 整个品牌区(箭头+logo+标题),不再只有箭头可点
+  $("panel-brand").addEventListener("click", () => void setExpanded(false));
 
   document.querySelectorAll<HTMLButtonElement>(".seg-btn").forEach((b) => {
     b.addEventListener("click", () => {
@@ -1319,6 +1623,27 @@ window.addEventListener("DOMContentLoaded", () => {
     if (showUsage) void refreshLimits();
     render();
   });
+  // 额度卡横向滑动:滚动时同步圆点;点圆点平滑滚过去
+  const quotaEl = $("u-quota");
+  quotaEl.addEventListener("scroll", () => {
+    const dots = document.querySelectorAll<HTMLElement>(".qp-dot");
+    if (!dots.length) return;
+    const max = Math.max(1, quotaEl.scrollWidth - quotaEl.clientWidth);
+    const cur = Math.min(dots.length - 1, Math.round((quotaEl.scrollLeft / max) * (dots.length - 1)));
+    dots.forEach((d, i) => d.classList.toggle("on", i === cur));
+  }, { passive: true });
+  $("qp-dots").addEventListener("click", (e) => {
+    const dot = (e.target as HTMLElement).closest<HTMLElement>(".qp-dot");
+    if (!dot) return;
+    const dots = document.querySelectorAll(".qp-dot").length;
+    const max = quotaEl.scrollWidth - quotaEl.clientWidth;
+    quotaEl.scrollTo({ left: (Number(dot.dataset.page) / Math.max(1, dots - 1)) * max, behavior: "smooth" });
+  });
+  // 鼠标用户也能按住拖动滑
+  let qDrag: { x: number; left: number } | null = null;
+  quotaEl.addEventListener("pointerdown", (e) => { qDrag = { x: e.clientX, left: quotaEl.scrollLeft }; });
+  window.addEventListener("pointermove", (e) => { if (qDrag) quotaEl.scrollLeft = qDrag.left - (e.clientX - qDrag.x); });
+  window.addEventListener("pointerup", () => { qDrag = null; });
   $("u-refresh").addEventListener("click", () => {
     void refreshLimits();
     void refreshUsage();
@@ -1341,6 +1666,26 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   });
   renderFieldToggles();
+  // 设置页:CLI 检测状态(Rust 侧 available_clis 探测安装,进程列表判断运行中)
+  const updateCliStatus = async () => {
+    const has = (n: string) => agents.some((a) => a.agent === n);
+    let installed: string[] = [];
+    try {
+      installed = await invoke<string[]>("available_clis");
+    } catch {
+      /* 旧后端没有该命令,退回进程判断 */
+    }
+    const label = (n: string) => (has(n) ? "运行中 ✓" : installed.includes(n) ? "已安装 ✓" : "未检测到");
+    $("s-cli-claude").textContent = label("claude");
+    $("s-cli-codex").textContent = label("codex");
+    $("s-cli-gemini").textContent = label("gemini");
+  };
+  updateCliStatus();
+  setInterval(updateCliStatus, 15_000);
+  $("tab-settings").addEventListener("click", updateCliStatus); // 打开设置即时刷新
+  document.querySelectorAll<HTMLButtonElement>("[data-open-url]").forEach((b) => {
+    b.addEventListener("click", () => void openUrl(b.dataset.openUrl!));
+  });
   $("s-quit").addEventListener("click", () => void getCurrentWindow().close());
   void invoke<Record<string, string>>("app_meta")
     .then((m) => ($("s-version").textContent = `v${m.version}`))
@@ -1376,7 +1721,110 @@ window.addEventListener("DOMContentLoaded", () => {
 
   $("summary-btn").addEventListener("click", () => void generateSummary());
   $("ev-save").addEventListener("click", () => void saveEvent());
+  // 截止时间快捷按钮:点一下填好选择器(今晚=23:59,其余当天 18:00)
+  document.querySelectorAll<HTMLButtonElement>("#ev-end-quick .chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const days = Number(btn.dataset.days ?? 0);
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      if (days === 0) d.setHours(23, 59, 0, 0);
+      else d.setHours(18, 0, 0, 0);
+      ($("ev-end") as HTMLInputElement).value = toLocalInputValue(d.toISOString());
+      document.querySelectorAll<HTMLButtonElement>("#ev-end-quick .chip").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+  // 比赛面板模块排序:按住 ⋮⋮ 上下拖动。纯 pointer 事件驱动,只在拖动瞬间工作,无常驻开销
+  const MOD_DEFAULT = ["qa", "ms", "cl", "work", "repo"];
+  const modBlocks = () =>
+    [...document.querySelectorAll<HTMLElement>("#event-live [data-key]")];
+  const applyModOrder = () => {
+    const order = store.get<string[]>("modOrder", MOD_DEFAULT);
+    const blocks = modBlocks();
+    const anchor = blocks[0]?.parentElement?.querySelector("#ev-edit")?.closest(".row") ?? null;
+    const parent = blocks[0]?.parentElement;
+    if (!parent) return;
+    for (const key of order) {
+      const b = blocks.find((x) => x.dataset.key === key);
+      if (b) parent.insertBefore(b, anchor);
+    }
+  };
+  applyModOrder();
+  document.querySelectorAll<HTMLElement>(".mod-drag").forEach((handle) => {
+    handle.addEventListener("click", (e) => e.stopPropagation()); // 把手不触发折叠
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const block = handle.closest<HTMLElement>("[data-key]")!;
+      block.classList.add("mod-dragging");
+      const move = (ev: PointerEvent) => {
+        // 越过相邻块中线即交换位置,DOM 操作次数极少
+        for (const other of modBlocks()) {
+          if (other === block) continue;
+          const r = other.getBoundingClientRect();
+          const mid = r.top + r.height / 2;
+          const br = block.getBoundingClientRect();
+          if (br.top > r.top && ev.clientY < mid) {
+            other.parentElement!.insertBefore(block, other);
+            break;
+          }
+          if (br.top < r.top && ev.clientY > mid) {
+            other.parentElement!.insertBefore(block, other.nextSibling);
+            break;
+          }
+        }
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        block.classList.remove("mod-dragging");
+        store.set("modOrder", modBlocks().map((b) => b.dataset.key!)); // 记住新顺序
+        void fitWindow();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+  });
+
+  // 比赛面板模块折叠:icon 标题 tips,点开看完整功能,开合状态记住
+  const modOpen = store.get<Record<string, boolean>>("modOpen", {});
+  document.querySelectorAll<HTMLElement>(".toggle-head[data-mod]").forEach((head) => {
+    const key = head.dataset.mod!;
+    const apply = () => {
+      const open = !!modOpen[key];
+      $(`${key}-body`).classList.toggle("hidden", !open);
+      $(`${key}-chev`).textContent = open ? "⌄" : "›";
+    };
+    apply();
+    head.addEventListener("click", () => {
+      modOpen[key] = !modOpen[key];
+      store.set("modOpen", modOpen);
+      apply();
+      void fitWindow();
+    });
+  });
   $("h-replan").addEventListener("click", () => void planMilestones());
+  // 项目进度:绑定/换绑仓库
+  $("h-repo-bind").addEventListener("click", () => {
+    const box = $("h-repo-bindbox");
+    const opening = box.classList.contains("hidden");
+    if (opening) {
+      const bound = store.get<string>("raceRepo", "");
+      const sel = $("h-repo-select") as HTMLSelectElement;
+      sel.innerHTML = repos.length
+        ? repos.map((r) => `<option value="${esc(r.path)}" ${r.path === bound ? "selected" : ""}>${esc(r.name)}</option>`).join("")
+        : `<option value="">今天还没有检测到开发中的仓库</option>`;
+    }
+    box.classList.toggle("hidden", !opening);
+    void fitWindow();
+  });
+  $("h-repo-save").addEventListener("click", () => {
+    const v = ($("h-repo-select") as HTMLSelectElement).value;
+    if (v) store.set("raceRepo", v);
+    $("h-repo-bindbox").classList.add("hidden");
+    void refreshRepoCommits();
+    render();
+  });
   $("h-ask-go").addEventListener("click", () => void askHackathon());
   $("h-ask").addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Enter") void askHackathon();
@@ -1400,8 +1848,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("ev-edit").addEventListener("click", () => {
     if (!event) return;
     ($("ev-name") as HTMLInputElement).value = event.name;
-    ($("ev-start") as HTMLInputElement).value = event.start.slice(0, 16);
-    ($("ev-end") as HTMLInputElement).value = event.end.slice(0, 16);
+    ($("ev-end") as HTMLInputElement).value = toLocalInputValue(event.end);
     ($("ev-doc") as HTMLTextAreaElement).value = event.doc ?? "";
     event = null;
     render();

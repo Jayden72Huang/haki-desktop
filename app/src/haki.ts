@@ -142,9 +142,25 @@ function schedule(delayMs: number) {
   }
 }
 
+/// 面板展开时暂停动画(定格当前帧),避免与内容渲染抢帧造成卡顿
+let animPaused = false;
+export function setHakiPaused(p: boolean) {
+  if (animPaused === p) return;
+  animPaused = p;
+  if (typeof pending === "number") {
+    clearTimeout(pending);
+    pending = null;
+  }
+  if (!p) {
+    lastTs = 0; // 恢复时重置时钟,防止大 dt 跳帧
+    schedule(0);
+  }
+}
+
 /* ---------- 每帧更新 ---------- */
 function tick(ts: number) {
   pending = null;
+  if (animPaused) return; // 暂停:不推进也不再排下一帧,定格在当前画面
   const dt = lastTs ? Math.min(ts - lastTs, 2000) : 16; // 低频唤醒 dt 可到秒级,夹住防极端跳变
   lastTs = ts;
   const a = ANIMS[state];

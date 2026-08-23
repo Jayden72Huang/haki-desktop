@@ -34,6 +34,8 @@ pub struct UsageToday {
     pub models: Vec<ModelStat>,
     /// 各数据来源(claude / codex)的用量,前端据此展示多 CLI 合计
     pub sources: Vec<SourceUsage>,
+    /// 今日分时用量:本地时区 24 小时分桶,含全部来源
+    pub hourly: Vec<u64>,
 }
 
 const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
@@ -85,6 +87,16 @@ pub struct SourceUsage {
     pub total: u64,
     pub sessions: usize,
     pub models: Vec<ModelStat>,
+    /// 该来源的今日分时用量(本地时区 24 桶)
+    pub hourly: Vec<u64>,
+}
+
+/// ISO UTC 时间串 → 本地小时(0-23),供分时柱状图归桶
+fn local_hour_of_iso(ts: &str) -> Option<usize> {
+    use chrono::Timelike;
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Local).hour() as usize)
 }
 
 fn models_sorted(m: HashMap<String, u64>) -> Vec<ModelStat> {
@@ -103,6 +115,7 @@ fn models_sorted(m: HashMap<String, u64>) -> Vec<ModelStat> {
 fn collect_codex_usage(since_ts: &str, mtime_cutoff: SystemTime) -> SourceUsage {
     let mut su = SourceUsage {
         source: "codex".into(),
+        hourly: vec![0; 24],
         ..Default::default()
     };
     let Some(root) = codex_sessions_dir() else {
@@ -163,6 +176,9 @@ fn collect_codex_usage(since_ts: &str, mtime_cutoff: SystemTime) -> SourceUsage 
             su.cache_write += cache_write;
             *models.entry(current_model.clone()).or_insert(0) +=
                 input + output + cached + cache_write;
+            if let Some(h) = local_hour_of_iso(ts) {
+                su.hourly[h] += input + output + cached + cache_write;
+            }
             sessions.insert(path.clone());
         }
     }
@@ -183,6 +199,7 @@ fn grok_sessions_dir() -> Option<PathBuf> {
 fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage {
     let mut su = SourceUsage {
         source: "grok".into(),
+        hourly: vec![0; 24],
         ..Default::default()
     };
     let Some(root) = grok_sessions_dir() else {
@@ -243,6 +260,15 @@ fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage
                 su.cache_read += cached;
                 su.cache_write += cache_write;
                 *models.entry(model).or_insert(0) += input + output + cached + cache_write;
+                // grok 事件时间戳是 unix 秒,换算本地小时归桶
+                use chrono::{TimeZone, Timelike};
+                if let Some(h) = chrono::Local
+                    .timestamp_opt(ts, 0)
+                    .single()
+                    .map(|d| d.hour() as usize)
+                {
+                    su.hourly[h] += input + output + cached + cache_write;
+                }
             }
             if let Some(dir) = path.parent() {
                 sessions.insert(dir.to_path_buf());
@@ -301,6 +327,7 @@ fn usage_today() -> Result<UsageToday, String> {
     let mut projects: HashSet<String> = HashSet::new();
     let mut per_project: HashMap<String, ProjectToday> = HashMap::new();
     let mut models: HashMap<String, u64> = HashMap::new();
+    let mut hourly = vec![0u64; 24];
 
     for path in jsonl_files_since(&root, cutoff) {
         result.scanned_files += 1;
@@ -344,6 +371,9 @@ fn usage_today() -> Result<UsageToday, String> {
             result.output += g("output_tokens");
             result.cache_write += g("cache_creation_input_tokens");
             result.cache_read += g("cache_read_input_tokens");
+            if let Some(h) = local_hour_of_iso(ts) {
+                hourly[h] += line_tokens;
+            }
             if let Some(model) = v["message"]["model"].as_str() {
                 if model != "<synthetic>" {
                     *models.entry(model.to_string()).or_insert(0) += line_tokens;
@@ -402,9 +432,18 @@ fn usage_today() -> Result<UsageToday, String> {
         total: result.all,
         sessions: result.sessions,
         models: result.models.clone(),
+        hourly,
     };
     let codex_source = collect_codex_usage(&today_start, cutoff);
     let grok_source = collect_grok_usage(local_today_start_epoch(), cutoff);
+    // 分时合计:三个来源逐桶相加
+    let mut total_hourly = vec![0u64; 24];
+    for src in [&claude_source, &codex_source, &grok_source] {
+        for (i, v) in src.hourly.iter().enumerate().take(24) {
+            total_hourly[i] += v;
+        }
+    }
+    result.hourly = total_hourly;
     result.sources = vec![claude_source, codex_source, grok_source];
     Ok(result)
 }
@@ -902,6 +941,43 @@ fn dev_today(paths: Vec<String>) -> Vec<RepoToday> {
     repos
 }
 
+/// 项目进度:单个仓库今天的一条 commit(比赛模式「项目进度」模块用)
+#[derive(Serialize)]
+pub struct RepoCommit {
+    pub ts: String,
+    pub message: String,
+    pub pushed: bool,
+}
+
+#[tauri::command]
+fn repo_commits(path: String, limit: usize) -> Result<Vec<RepoCommit>, String> {
+    let root = git(&path, &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| format!("不是 git 仓库: {path}"))?;
+    // 未推送 SHA 集合;命令失败(通常是没配 upstream)时为 None,全部按未推送处理
+    let unpushed: Option<HashSet<String>> = git(&root, &["rev-list", "@{u}..HEAD"])
+        .map(|s| s.lines().map(|l| l.trim().to_string()).collect());
+    let n = limit.clamp(1, 100).to_string();
+    let log = git(
+        &root,
+        &["log", "--since=midnight", "-n", &n, "--pretty=%H%x09%cI%x09%s"],
+    )
+    .unwrap_or_default();
+    let mut commits = Vec::new();
+    for line in log.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(sha), Some(ts)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let pushed = unpushed.as_ref().is_some_and(|set| !set.contains(sha));
+        commits.push(RepoCommit {
+            ts: ts.to_string(),
+            message: parts.next().unwrap_or("").to_string(),
+            pushed,
+        });
+    }
+    Ok(commits)
+}
+
 /// 调用本机 claude CLI 生成每日总结(headless 模式)
 #[tauri::command]
 async fn ai_daily_summary(data: String) -> Result<String, String> {
@@ -950,6 +1026,101 @@ fn run_claude(prompt: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 问答可用的 coding agent CLI,按优先级排列
+const AI_CLIS: [&str; 3] = ["claude", "codex", "gemini"];
+
+fn cli_exists(cmd: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    let probe = Command::new("where").arg(cmd).output();
+    #[cfg(not(target_os = "windows"))]
+    let probe = Command::new("which").arg(cmd).output();
+    probe.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// 调本地 codex CLI(headless)。codex exec 会把日志混进 stdout,
+/// 所以用 --output-last-message 落盘拿干净的最终回答;cwd 指到临时目录,
+/// 配合 --skip-git-repo-check 避免它扫描用户工作目录。
+fn run_codex(prompt: &str) -> Result<String, String> {
+    let tmp = std::env::temp_dir();
+    let out_file = tmp.join(format!("haki-codex-out-{}.txt", std::process::id()));
+    let out = Command::new("codex")
+        .args(["exec", "--skip-git-repo-check", "--output-last-message"])
+        .arg(&out_file)
+        .arg(prompt)
+        .current_dir(&tmp)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("调用 codex CLI 失败(确认已安装 codex 命令): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "codex CLI 返回错误: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let msg = std::fs::read_to_string(&out_file).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_file);
+    let msg = msg.trim().to_string();
+    if msg.is_empty() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Ok(msg)
+    }
+}
+
+/// 调本地 gemini CLI(headless)
+fn run_gemini(prompt: &str) -> Result<String, String> {
+    let out = Command::new("gemini")
+        .args(["-p", prompt])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("调用 gemini CLI 失败(确认已安装 gemini 命令): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "gemini CLI 返回错误: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 按 claude → codex → gemini 优先级找本机可用的 CLI 跑一次无头问答;
+/// 前一个失败就顺延下一个,全都没装时的报错必须含「确认已安装」——前端靠它降级本地检索。
+fn run_ai(prompt: &str) -> Result<String, String> {
+    let mut last_err: Option<String> = None;
+    for cli in AI_CLIS {
+        if !cli_exists(cli) {
+            continue;
+        }
+        let r = match cli {
+            "claude" => run_claude(prompt),
+            "codex" => run_codex(prompt),
+            _ => run_gemini(prompt),
+        };
+        match r {
+            Ok(s) if !s.is_empty() => return Ok(s),
+            Ok(_) => last_err = Some(format!("{cli} CLI 返回了空内容")),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        "没有可用的 AI CLI(确认已安装 claude / codex / gemini 任意一个命令)".to_string()
+    }))
+}
+
+/// 返回本机已安装的 coding agent CLI 列表(设置页「Haki 问答引擎」状态展示用)
+#[tauri::command]
+async fn available_clis() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        AI_CLIS
+            .into_iter()
+            .filter(|c| cli_exists(c))
+            .map(String::from)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// CLI 常把 JSON 裹在 ```json 里或前后带解释,这里剥出纯 JSON
@@ -1031,7 +1202,7 @@ async fn ask_hackathon(
              3. 文档里没写的,明确说「文档里没写」,再给一句最合理的建议(比如去问主办方群里的谁)\n\
              4. 不要客套话,不要 markdown 标题和加粗,不要复述问题"
         );
-        run_claude(&prompt)
+        run_ai(&prompt)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1270,6 +1441,8 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
         total: total_tokens,
         sessions: sessions.len(),
         models: models_vec.clone(),
+        // 多日档案不做分时,留空即可
+        hourly: Vec::new(),
     };
     let codex_source = collect_codex_usage(&format!("{cutoff_day}T00:00:00"), cutoff_sys);
     // 与 cutoff_day(UTC 零点)同口径的 epoch 秒
@@ -1837,9 +2010,11 @@ pub fn run() {
             running_agents,
             agent_status,
             dev_today,
+            repo_commits,
             ai_daily_summary,
             plan_hackathon,
             ask_hackathon,
+            available_clis,
             extract_work,
             push_work,
             rate_limits,

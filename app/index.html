@@ -9,14 +9,19 @@
   </head>
 
   <body>
+    <!-- Haki 舞台:常驻在栏顶,永不被 render() 重写 -->
+    <div id="haki-stage" data-tauri-drag-region>
+      <div id="haki" class="haki-sprite"></div>
+    </div>
+
     <!-- 收起态:胶囊条 -->
     <div id="pill" class="pill" data-tauri-drag-region>
       <span class="chev" data-tauri-drag-region>›</span>
       <img class="brand-logo" src="/src/assets/logo.png" alt="" data-tauri-drag-region />
       <span class="title" id="pill-title" data-tauri-drag-region>HackerTrip</span>
       <span class="spacer" data-tauri-drag-region></span>
-      <span class="badge mono" id="pill-main">—</span>
-      <span class="badge green" id="pill-status">读取中</span>
+      <span class="badge mono" id="pill-main" data-tauri-drag-region>—</span>
+      <span class="badge green" id="pill-status" data-tauri-drag-region>读取中</span>
     </div>
 
     <!-- 展开态:面板 -->

@@ -890,3 +890,28 @@ textarea:focus {
   font-size: 19px;
   letter-spacing: -0.02em;
 }
+
+/* ============ Haki 像素小人舞台 ============ */
+#haki-stage {
+  position: relative;
+  height: 44px; /* 固定高度:fitWindow 依赖 scrollHeight 稳定,勿改成自适应 */
+  overflow: visible; /* 允许脚底下探 4px 压住 pill 的上 margin */
+  z-index: 5;
+}
+.haki-sprite {
+  position: absolute;
+  bottom: -4px; /* 踩在 pill/panel 的上边框上 */
+  left: 0;
+  width: 40px;
+  height: 40px;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  pointer-events: none; /* 点击透传给 stage 的拖拽区 */
+  will-change: transform;
+  /* 不设 transition:位移与翻转由 JS 逐帧驱动,翻转必须瞬时 */
+}
+
+/* 表单校验提示:比赛表单静默失败改为可见原因 */
+.hint-error {
+  color: var(--urgent) !important;
+}

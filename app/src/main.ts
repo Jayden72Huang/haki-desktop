@@ -7,6 +7,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import QRCode from "qrcode";
+import { initHaki, setHakiInputs } from "./haki";
 
 /* ---------- 类型 ---------- */
 interface ProjectToday {
@@ -176,9 +177,28 @@ const PHASES = [
 const DEFAULT_CHECKLIST = ["线上 demo 可访问", "README 补齐运行说明", "演示视频 ≤ 3 分钟", "完成平台提交"];
 
 /* ---------- 窗口尺寸 ---------- */
+/// Haki 舞台条高度。展开态 scrollHeight 已包含 stage,只抬上限,勿再叠加
+const STAGE_H = 44;
+let lastFitH = 0; // 高度没变就不发 setSize IPC:render 每 15s 跑一次,窗口操作是跨进程调用
 async function fitWindow() {
-  const h = expanded ? Math.min(document.body.scrollHeight + 12, 620) : 64;
+  const h = expanded ? Math.min(document.body.scrollHeight + 12, 620 + STAGE_H) : 64 + STAGE_H;
+  if (h === lastFitH) return;
+  lastFitH = h;
   await getCurrentWindow().setSize(new LogicalSize(660, h));
+}
+
+/* ---------- Haki 输入同步 ---------- */
+/// 把 mode/agent 运行态/比赛进度推给小人。"在运行"用 dotState 而非进程存在:
+/// 挂着等输入的 CLI 不算干活,confirm/done 时小人闲下来反而是"该我上场"的提醒
+function hakiSync() {
+  const running = agents.some((a) => dotState(a) === "running");
+  let progress: number | null = null;
+  if (mode === "hackathon" && event) {
+    const s = new Date(event.start).getTime();
+    const e = new Date(event.end).getTime();
+    progress = e > s ? Math.min(1, Math.max(0, (Date.now() - s) / (e - s))) : 1;
+  }
+  setHakiInputs({ mode, agentRunning: running, progress });
 }
 
 /* ---------- 数据刷新 ---------- */
@@ -230,6 +250,7 @@ async function refreshAgents() {
   } catch (e) {
     console.error(e);
   }
+  hakiSync();
   render();
 }
 
@@ -937,14 +958,29 @@ function renderChecklist() {
 async function saveEvent() {
   const name = ($("ev-name") as HTMLInputElement).value.trim();
   const start = ($("ev-start") as HTMLInputElement).value;
-  const end = ($("ev-end") as HTMLInputElement).value;
+  const endInput = $("ev-end") as HTMLInputElement;
+  const end = endInput.value;
   const doc = ($("ev-doc") as HTMLTextAreaElement)?.value.trim() ?? "";
-  if (!name || !end) return;
+  // 之前校验不过就静默 return,看起来像「按钮点不动」。WKWebView 的 datetime-local
+  // 分段没填完时 .value 为空串(界面上却像填了),必须把原因说出来
+  const hint = $("ev-plan-hint");
+  if (!name || !end) {
+    hint.textContent = !name
+      ? "请先填写比赛名称"
+      : endInput.validity?.badInput
+        ? "截止时间没填完整(日期和上午/下午时间每段都要选)"
+        : "请填写提交截止时间";
+    hint.classList.add("hint-error");
+    return;
+  }
+  hint.textContent = "";
+  hint.classList.remove("hint-error");
   event = { name, start: start || new Date().toISOString(), end, doc };
   store.set("event", event);
   store.set("checklist", DEFAULT_CHECKLIST.map(() => false));
   notifiedMilestones.clear();
   store.set("notified_ms", []);
+  hakiSync();
   render();
   await planMilestones();
 }
@@ -1233,6 +1269,22 @@ async function setExpanded(next: boolean) {
 }
 
 /* ---------- 启动 ---------- */
+/// 悬浮窗没有 devtools 入口,运行时 JS 错误落到状态徽标上,否则表现就是「按钮点不动」
+function surfaceError(msg: string) {
+  const s = document.getElementById("pill-status");
+  if (s) {
+    s.textContent = `JS错误: ${msg.slice(0, 60)}`;
+    s.className = "badge red";
+  }
+  console.error(msg);
+}
+window.addEventListener("error", (e) => surfaceError(e.message));
+window.addEventListener("unhandledrejection", (e) => {
+  const r = String((e as PromiseRejectionEvent).reason ?? "");
+  // Tauri invoke 的业务失败各自有 catch,这里只兜真正的代码错误
+  if (r.includes("TypeError") || r.includes("ReferenceError")) surfaceError(r);
+});
+
 window.addEventListener("DOMContentLoaded", () => {
   $("pill").addEventListener("click", (e) => {
     if ((e.target as HTMLElement).closest(".badge")) return;
@@ -1246,6 +1298,7 @@ window.addEventListener("DOMContentLoaded", () => {
       store.set("mode", mode);
       showSettings = false;
       showUsage = false;
+      hakiSync();
       render();
     });
   });
@@ -1358,9 +1411,12 @@ window.addEventListener("DOMContentLoaded", () => {
     store.del("event");
     mode = "daily";
     store.set("mode", mode);
+    hakiSync();
     render();
   });
 
+  initHaki();
+  hakiSync();
   void setExpanded(false);
   void refreshUsage();
   void refreshAgents();
@@ -1370,7 +1426,10 @@ window.addEventListener("DOMContentLoaded", () => {
   setInterval(() => void refreshAgents(), 15_000); // agent 进程:每 15 秒
   setInterval(() => void nightlyCheck(), 60_000); // 22:00 每日总结提醒
   setInterval(() => {
-    if (mode === "hackathon" && event) renderPill();
+    if (mode === "hackathon" && event) {
+      renderPill();
+      hakiSync(); // 每秒推最新 progress,小人位置钉住倒计时
+    }
     if (expanded && mode === "hackathon" && event) $("h-countdown").textContent = countdownText() ?? "已截止";
   }, 1000); // 倒计时每秒走
   setInterval(() => checkMilestoneAlerts(), 30_000); // 赛程节点提醒

@@ -1617,6 +1617,18 @@ window.addEventListener("DOMContentLoaded", () => {
     if (showSettings) renderFieldToggles();
     render();
   });
+  // 官方小程序码浮窗:点按钮开合,点浮窗外任意处关闭
+  $("tab-miniprogram").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("mp-pop").classList.toggle("hidden");
+    $("tab-miniprogram").classList.toggle("active", !$("mp-pop").classList.contains("hidden"));
+  });
+  document.addEventListener("click", (e) => {
+    if ($("mp-pop").classList.contains("hidden")) return;
+    if ((e.target as HTMLElement).closest("#mp-pop, #tab-miniprogram")) return;
+    $("mp-pop").classList.add("hidden");
+    $("tab-miniprogram").classList.remove("active");
+  });
   $("tab-usage").addEventListener("click", () => {
     showUsage = !showUsage;
     showSettings = false;

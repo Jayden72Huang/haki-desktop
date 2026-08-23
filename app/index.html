@@ -43,12 +43,20 @@
 
       <!-- 网站入口(浏览器打开) -->
       <div class="tabs" data-tauri-drag-region>
+        <button class="tab" id="tab-miniprogram">官方小程序</button>
         <button class="tab" data-url="https://hackertrip.space/explore">赛事 ↗</button>
-        <button class="tab" data-url="https://hackertrip.space/dashboard">我的 ↗</button>
-        <button class="tab" data-url="https://hackertrip.space/guides">指南 ↗</button>
+        <button class="tab" data-url="https://github.com/Jayden72Huang/haki-desktop">GitHub ↗</button>
+        <button class="tab" data-url="https://hackertrip.space/haki-desktop">指南 ↗</button>
         <span class="spacer"></span>
         <button class="tab" id="tab-usage">用量</button>
         <button class="tab" id="tab-settings">设置</button>
+      </div>
+
+      <!-- 官方小程序码浮窗:扫码进小程序,引导去「发现」页 -->
+      <div id="mp-pop" class="mp-pop hidden">
+        <img class="mp-qr" src="/src/assets/miniprogram-qr.jpg" alt="HackerTrip 小程序码" />
+        <div class="mp-title">HackerTrip 官方小程序</div>
+        <div class="mp-sub">微信扫码打开 · 进入底部「发现」页浏览全部赛事</div>
       </div>
 
       <div id="panel-body" data-tauri-drag-region>

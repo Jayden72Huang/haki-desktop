@@ -1138,3 +1138,41 @@ textarea:focus {
 .mod-dragging .mod-drag {
   cursor: grabbing;
 }
+
+/* 官方小程序码浮窗 */
+.panel {
+  position: relative;
+}
+.mp-pop {
+  position: absolute;
+  top: 96px; /* tabs 行下方 */
+  left: 20px;
+  z-index: 30;
+  width: 220px;
+  padding: 16px 16px 14px;
+  border-radius: 16px;
+  background: rgba(16, 12, 24, 0.97);
+  border: 0.5px solid rgba(139, 79, 232, 0.4);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 24px rgba(139, 79, 232, 0.15);
+  text-align: center;
+}
+.mp-qr {
+  width: 168px;
+  height: 168px;
+  border-radius: 12px;
+  background: #fff;
+  padding: 6px;
+  object-fit: contain;
+}
+.mp-title {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.mp-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--mut);
+  line-height: 1.5;
+}

@@ -11,6 +11,7 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB?logo=tauri&logoColor=white)](https://tauri.app)
 [![Platform](https://img.shields.io/badge/macOS-first-000000?logo=apple&logoColor=white)](#快速开始)
 [![Website](https://img.shields.io/badge/官网-hackertrip.space%2Fhaki--desktop-f0557e)](https://hackertrip.space/haki-desktop)
+[![License](https://img.shields.io/badge/License-PolyForm%20NC%201.0.0-8b4fe8)](LICENSE.md)
 
 [官网介绍页](https://hackertrip.space/haki-desktop) · [HackerTrip 主站](https://hackertrip.space) · [快速开始](#快速开始)
 
@@ -70,6 +71,12 @@ npm run tauri dev
 - 产品介绍页：[hackertrip.space/haki-desktop](https://hackertrip.space/haki-desktop)
 - HackerTrip 一站式黑客松平台：[hackertrip.space](https://hackertrip.space)
 - 早期产品规划：[docs/PLAN.md](docs/PLAN.md)
+
+## 协议
+
+本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE.md)：**源码开放，个人非商业使用免费**——下载、使用、修改、分享都可以；任何商业用途（售卖、嵌入商业产品、商业化部署等）需联系我们获得授权。
+
+第三方参考与致谢见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 ---
 

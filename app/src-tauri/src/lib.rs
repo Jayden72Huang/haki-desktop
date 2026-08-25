@@ -1109,18 +1109,20 @@ fn run_ai(prompt: &str) -> Result<String, String> {
     }))
 }
 
+fn detected_clis() -> Vec<String> {
+    AI_CLIS
+        .into_iter()
+        .filter(|c| cli_exists(c))
+        .map(String::from)
+        .collect()
+}
+
 /// 返回本机已安装的 coding agent CLI 列表(设置页「Haki 问答引擎」状态展示用)
 #[tauri::command]
 async fn available_clis() -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        AI_CLIS
-            .into_iter()
-            .filter(|c| cli_exists(c))
-            .map(String::from)
-            .collect::<Vec<_>>()
-    })
-    .await
-    .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(detected_clis)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// CLI 常把 JSON 裹在 ```json 里或前后带解释,这里剥出纯 JSON
@@ -1173,6 +1175,608 @@ async fn plan_hackathon(
             )
         })?;
         Ok(json)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ============ 赞助商模型供应商一键接入(cc-switch 式) ============
+
+/// 一个可接入的赞助商/第三方模型端点
+#[derive(Serialize, Clone)]
+pub struct ProviderProfile {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base_url: &'static str,
+    /// 写入哪个 CLI 的配置: "claude" | "codex"
+    pub target_cli: &'static str,
+    /// 去哪里领取 API Key 的指引页
+    pub key_url: &'static str,
+    /// 推荐主模型;空串表示端点固定模型、不用写
+    pub model: &'static str,
+    pub note: &'static str,
+}
+
+const PROVIDER_PROFILES: &[ProviderProfile] = &[
+    ProviderProfile { id: "glm-claude", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/anthropic", target_cli: "claude", key_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys", model: "glm-4.6", note: "GLM Coding Plan,黑客松最常见赞助" },
+    ProviderProfile { id: "kimi-claude", name: "Kimi (Moonshot)", base_url: "https://api.moonshot.cn/anthropic", target_cli: "claude", key_url: "https://platform.moonshot.cn/console/api-keys", model: "kimi-k2-turbo-preview", note: "Anthropic 兼容端点" },
+    ProviderProfile { id: "deepseek-claude", name: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", target_cli: "claude", key_url: "https://platform.deepseek.com/api_keys", model: "deepseek-chat", note: "Anthropic 兼容端点" },
+    ProviderProfile { id: "qwen-claude", name: "通义千问(百炼)", base_url: "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy", target_cli: "claude", key_url: "https://bailian.console.aliyun.com/?tab=model#/api-key", model: "", note: "阿里云百炼 Claude Code 代理,模型端点侧固定" },
+    ProviderProfile { id: "minimax-claude", name: "MiniMax", base_url: "https://api.minimaxi.com/anthropic", target_cli: "claude", key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key", model: "MiniMax-M2", note: "Anthropic 兼容端点" },
+    ProviderProfile { id: "glm-codex", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/coding/paas/v4", target_cli: "codex", key_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys", model: "glm-4.6", note: "OpenAI 兼容端点(coding 专用)" },
+    ProviderProfile { id: "kimi-codex", name: "Kimi (Moonshot)", base_url: "https://api.moonshot.cn/v1", target_cli: "codex", key_url: "https://platform.moonshot.cn/console/api-keys", model: "kimi-k2-turbo-preview", note: "OpenAI 兼容端点" },
+    ProviderProfile { id: "deepseek-codex", name: "DeepSeek", base_url: "https://api.deepseek.com/v1", target_cli: "codex", key_url: "https://platform.deepseek.com/api_keys", model: "deepseek-chat", note: "OpenAI 兼容端点" },
+    ProviderProfile { id: "qwen-codex", name: "通义千问(百炼)", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", target_cli: "codex", key_url: "https://bailian.console.aliyun.com/?tab=model#/api-key", model: "qwen3-coder-plus", note: "OpenAI 兼容端点" },
+];
+
+/// 运行时供应商条目:内置清单与赞助商热配置合并后的结果
+#[derive(Serialize, Clone)]
+pub struct ProviderEntry {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub target_cli: String,
+    pub key_url: String,
+    pub model: String,
+    pub note: String,
+    /// 赛事赞助商置顶推荐
+    pub sponsored: bool,
+    /// 赛事专属领取指引文案
+    pub sponsor_note: String,
+}
+
+/// sponsors.json 条目:按 id 覆写内置项(字段可省略),或带齐 name/base_url/target_cli 追加新端点
+#[derive(serde::Deserialize)]
+struct SponsorOverride {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    target_cli: Option<String>,
+    #[serde(default)]
+    key_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    sponsored: Option<bool>,
+    #[serde(default)]
+    sponsor_note: Option<String>,
+}
+
+fn haki_sponsors_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".haki").join("sponsors.json"))
+}
+
+/// 远端投放配置的本地缓存。与手改文件分离:远端只写这里,sponsors.json 程序永不写入
+fn haki_sponsors_remote_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".haki").join("sponsors-remote.json"))
+}
+
+/// 拉远端品牌位配置刷新本地缓存;拉不到或不是合法 JSON 就保持现有缓存不动
+fn refresh_sponsors_cache() {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(4)))
+        .build()
+        .into();
+    let Ok(mut resp) = agent
+        .get("https://hackertrip.space/api/desktop/sponsors")
+        .call()
+    else {
+        return;
+    };
+    let Ok(body) = resp.body_mut().read_to_string() else {
+        return;
+    };
+    if serde_json::from_str::<Vec<SponsorOverride>>(&body).is_err() {
+        return;
+    }
+    if let Some(p) = haki_sponsors_remote_path() {
+        if let Some(dir) = p.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(p, body);
+    }
+}
+
+/// 内置清单 + sponsors.json 覆写合并;refresh_remote 时先拉一次远端(带 4s 超时)
+fn merged_profiles(refresh_remote: bool) -> Vec<ProviderEntry> {
+    if refresh_remote {
+        refresh_sponsors_cache();
+    }
+    let mut list: Vec<ProviderEntry> = PROVIDER_PROFILES
+        .iter()
+        .map(|p| ProviderEntry {
+            id: p.id.into(),
+            name: p.name.into(),
+            base_url: p.base_url.into(),
+            target_cli: p.target_cli.into(),
+            key_url: p.key_url.into(),
+            model: p.model.into(),
+            note: p.note.into(),
+            sponsored: false,
+            sponsor_note: String::new(),
+        })
+        .collect();
+    // 合并顺序:内置清单 → 远端缓存 → 本地手改(sponsors.json 永远最后应用,现场手改必胜)
+    let read_overrides = |p: Option<PathBuf>| -> Vec<SponsorOverride> {
+        p.and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    };
+    for overrides in [
+        read_overrides(haki_sponsors_remote_path()),
+        read_overrides(haki_sponsors_path()),
+    ] {
+        for o in overrides {
+            if let Some(e) = list.iter_mut().find(|e| e.id == o.id) {
+                if let Some(v) = o.name {
+                    e.name = v;
+                }
+                if let Some(v) = o.base_url {
+                    e.base_url = v;
+                }
+                if let Some(v) = o.target_cli {
+                    e.target_cli = v;
+                }
+                if let Some(v) = o.key_url {
+                    e.key_url = v;
+                }
+                if let Some(v) = o.model {
+                    e.model = v;
+                }
+                if let Some(v) = o.note {
+                    e.note = v;
+                }
+                if let Some(v) = o.sponsored {
+                    e.sponsored = v;
+                }
+                if let Some(v) = o.sponsor_note {
+                    e.sponsor_note = v;
+                }
+            } else if let (Some(name), Some(base_url), Some(target_cli)) =
+                (o.name, o.base_url, o.target_cli)
+            {
+                list.push(ProviderEntry {
+                    id: o.id,
+                    name,
+                    base_url,
+                    target_cli,
+                    key_url: o.key_url.unwrap_or_default(),
+                    model: o.model.unwrap_or_default(),
+                    note: o.note.unwrap_or_default(),
+                    sponsored: o.sponsored.unwrap_or(false),
+                    sponsor_note: o.sponsor_note.unwrap_or_default(),
+                });
+            }
+        }
+    }
+    // 赞助商置顶,其余保持原顺序(stable sort)
+    list.sort_by_key(|e| !e.sponsored);
+    list
+}
+
+/// 赞助商端点清单(含品牌位热配置),前端渲染选择列表
+#[tauri::command]
+async fn provider_profiles() -> Result<Vec<ProviderEntry>, String> {
+    tauri::async_runtime::spawn_blocking(|| merged_profiles(true))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn claude_settings_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|h| h.join(".claude").join("settings.json"))
+        .ok_or_else(|| "找不到用户主目录".to_string())
+}
+
+fn codex_config_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|h| h.join(".codex").join("config.toml"))
+        .ok_or_else(|| "找不到用户主目录".to_string())
+}
+
+fn codex_auth_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|h| h.join(".codex").join("auth.json"))
+        .ok_or_else(|| "找不到用户主目录".to_string())
+}
+
+/// 改配置前先备份。文件存在→拷成 <名>.haki-bak-<ts>;
+/// 不存在→建 <名>.haki-bak-<ts>.absent 空标记,restore 时据此删除新建的文件。
+fn backup_config(path: &PathBuf, ts: &str) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "非法配置路径".to_string())?;
+    if path.exists() {
+        let bak = path.with_file_name(format!("{name}.haki-bak-{ts}"));
+        fs::copy(path, &bak).map_err(|e| format!("备份 {name} 失败: {e}"))?;
+        Ok(bak)
+    } else {
+        let bak = path.with_file_name(format!("{name}.haki-bak-{ts}.absent"));
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
+        }
+        fs::write(&bak, "").map_err(|e| format!("写备份标记失败: {e}"))?;
+        Ok(bak)
+    }
+}
+
+/// 找某个配置文件最近一次备份(按文件名里的时间戳排序)
+fn latest_backup(path: &PathBuf) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?.to_string();
+    let dir = path.parent()?;
+    let prefix = format!("{name}.haki-bak-");
+    let mut baks: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .collect();
+    baks.sort();
+    baks.pop()
+}
+
+/// 用最近一次备份还原;.absent 标记表示原来没有这个文件,直接删掉现文件
+fn restore_from_backup(path: &PathBuf) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("配置文件");
+    let Some(bak) = latest_backup(path) else {
+        return Ok(format!("{name}: 没有找到备份,跳过"));
+    };
+    let bak_name = bak.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if bak_name.ends_with(".absent") {
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| format!("删除 {name} 失败: {e}"))?;
+        }
+        Ok(format!("{name}: 接入前不存在,已移除"))
+    } else {
+        fs::copy(&bak, path).map_err(|e| format!("还原 {name} 失败: {e}"))?;
+        Ok(format!("{name}: 已还原自 {bak_name}"))
+    }
+}
+
+const CODEX_MARK_BEGIN: &str = "# >>> haki-sponsor >>>";
+const CODEX_MARK_END: &str = "# <<< haki-sponsor <<<";
+
+/// 剥掉 config.toml 里所有 haki 托管块,并把根级 model_provider/model 赋值注释掉
+/// (根级键必须在第一个 [table] 之前,所以托管块的根赋值要插到文件最前面)
+fn codex_strip_managed(content: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    let mut seen_table = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t == CODEX_MARK_BEGIN {
+            in_block = true;
+            continue;
+        }
+        if t == CODEX_MARK_END {
+            in_block = false;
+            continue;
+        }
+        if in_block {
+            continue;
+        }
+        if t.starts_with('[') {
+            seen_table = true;
+        }
+        // 只注释根级 model / model_provider 赋值,不误伤 model_reasoning_effort 等其它 model* 键
+        let is_root_model_key = t
+            .split_once('=')
+            .map(|(k, _)| matches!(k.trim(), "model" | "model_provider"))
+            .unwrap_or(false);
+        if !seen_table && !t.starts_with('#') && is_root_model_key {
+            out.push(format!("# haki-disabled: {line}"));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n")
+}
+
+/// 一键接入:备份 → 写配置,写失败自动回滚。key 只落本地配置文件,不上传不进日志。
+#[tauri::command]
+async fn apply_provider(
+    cli: String,
+    provider_id: String,
+    api_key: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = api_key.trim().to_string();
+        if key.is_empty() {
+            return Err("API Key 不能为空".to_string());
+        }
+        let profiles = merged_profiles(false);
+        let p = profiles
+            .iter()
+            .find(|p| p.id == provider_id)
+            .ok_or_else(|| format!("未知的供应商 id: {provider_id}"))?;
+        if p.target_cli != cli {
+            return Err(format!("{} 是 {} 的端点,不能接到 {cli}", p.name, p.target_cli));
+        }
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        match cli.as_str() {
+            "claude" => {
+                let path = claude_settings_path()?;
+                let bak = backup_config(&path, &ts)?;
+                let raw = fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+                let mut root: serde_json::Value =
+                    serde_json::from_str(&raw).map_err(|e| format!("settings.json 不是合法 JSON,先修复再接入: {e}"))?;
+                if !root.is_object() {
+                    return Err("settings.json 顶层不是对象,先修复再接入".to_string());
+                }
+                let env = root
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("env")
+                    .or_insert_with(|| serde_json::json!({}));
+                let Some(env) = env.as_object_mut() else {
+                    return Err("settings.json 的 env 字段不是对象,先修复再接入".to_string());
+                };
+                env.insert("ANTHROPIC_BASE_URL".into(), serde_json::json!(p.base_url));
+                env.insert("ANTHROPIC_AUTH_TOKEN".into(), serde_json::json!(key));
+                if p.model.is_empty() {
+                    env.remove("ANTHROPIC_MODEL");
+                } else {
+                    env.insert("ANTHROPIC_MODEL".into(), serde_json::json!(p.model));
+                }
+                let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+                if let Err(e) = fs::write(&path, pretty) {
+                    let _ = restore_from_backup(&path);
+                    return Err(format!("写入 settings.json 失败,已回滚: {e}"));
+                }
+                Ok(format!(
+                    "已接入 {}。重启 Claude Code 会话后生效;备份: {}",
+                    p.name,
+                    bak.display()
+                ))
+            }
+            "codex" => {
+                let cfg_path = codex_config_path()?;
+                let auth_path = codex_auth_path()?;
+                let cfg_bak = backup_config(&cfg_path, &ts)?;
+                let auth_bak = backup_config(&auth_path, &ts)?;
+                let old = fs::read_to_string(&cfg_path).unwrap_or_default();
+                let body = codex_strip_managed(&old);
+                let model_line = if p.model.is_empty() {
+                    String::new()
+                } else {
+                    format!("model = \"{}\"\n", p.model)
+                };
+                let new_cfg = format!(
+                    "{CODEX_MARK_BEGIN}\nmodel_provider = \"haki_sponsor\"\n{model_line}{CODEX_MARK_END}\n{}\n{CODEX_MARK_BEGIN}\n[model_providers.haki_sponsor]\nname = \"{}\"\nbase_url = \"{}\"\nwire_api = \"chat\"\n{CODEX_MARK_END}\n",
+                    body.trim_end(),
+                    p.name,
+                    p.base_url
+                );
+                if let Err(e) = fs::write(&cfg_path, new_cfg) {
+                    let _ = restore_from_backup(&cfg_path);
+                    let _ = restore_from_backup(&auth_path);
+                    return Err(format!("写入 config.toml 失败,已回滚: {e}"));
+                }
+                let auth = serde_json::json!({ "OPENAI_API_KEY": key });
+                if let Err(e) = fs::write(&auth_path, auth.to_string()) {
+                    let _ = restore_from_backup(&cfg_path);
+                    let _ = restore_from_backup(&auth_path);
+                    return Err(format!("写入 auth.json 失败,已回滚: {e}"));
+                }
+                Ok(format!(
+                    "已接入 {}。新开 codex 会话生效;备份: {} 与 {}",
+                    p.name,
+                    cfg_bak.display(),
+                    auth_bak.display()
+                ))
+            }
+            other => Err(format!("不支持的 CLI: {other}")),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 一键还原最近一次接入前的配置
+#[tauri::command]
+async fn restore_provider(cli: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || match cli.as_str() {
+        "claude" => restore_from_backup(&claude_settings_path()?),
+        "codex" => {
+            let a = restore_from_backup(&codex_config_path()?)?;
+            let b = restore_from_backup(&codex_auth_path()?)?;
+            Ok(format!("{a};{b}"))
+        }
+        other => Err(format!("不支持的 CLI: {other}")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// current_provider 的同步内核,sync_profile 的用量回执也复用它
+fn current_provider_value(cli: &str) -> Result<serde_json::Value, String> {
+    {
+        let base_url: Option<String> = match cli {
+            "claude" => {
+                let raw = fs::read_to_string(claude_settings_path()?).unwrap_or_default();
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("env")?
+                            .get("ANTHROPIC_BASE_URL")?
+                            .as_str()
+                            .map(String::from)
+                    })
+            }
+            "codex" => {
+                let raw = fs::read_to_string(codex_config_path()?).unwrap_or_default();
+                // 只认 haki 托管块里的 base_url,手工配置的第三方端点不猜
+                let mut in_block = false;
+                let mut found = None;
+                for line in raw.lines() {
+                    let t = line.trim();
+                    if t == CODEX_MARK_BEGIN {
+                        in_block = true;
+                    } else if t == CODEX_MARK_END {
+                        in_block = false;
+                    } else if in_block {
+                        if let Some(rest) = t.strip_prefix("base_url") {
+                            let v = rest.trim_start_matches(['=', ' ']).trim_matches('"');
+                            found = Some(v.to_string());
+                        }
+                    }
+                }
+                found
+            }
+            other => return Err(format!("不支持的 CLI: {other}")),
+        };
+        let profiles = merged_profiles(false);
+        let matched = base_url
+            .as_deref()
+            .and_then(|u| profiles.iter().find(|p| p.base_url == u));
+        Ok(serde_json::json!({
+            "cli": cli,
+            "base_url": base_url,
+            "provider_id": matched.map(|p| p.id.clone()),
+            "name": matched.map(|p| p.name.clone()),
+        }))
+    }
+}
+
+/// 当前生效的端点:返回 { cli, base_url, provider_id, name },官方默认时 base_url 为 null
+#[tauri::command]
+async fn current_provider(cli: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || current_provider_value(&cli))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ============ 赛事文档:贴 URL 自动抓正文 ============
+
+/// 粗剥 html 标签取正文;抓不到有效内容时报错让前端引导手动粘贴
+fn html_to_text(html: &str) -> String {
+    // 先整块剔除 script/style/noscript
+    let mut s = html.to_string();
+    for tag in ["script", "style", "noscript"] {
+        loop {
+            // 注意:to_lowercase 对个别 Unicode 字符会变长,查到的下标必须校验 char 边界后才能用
+            let low = s.to_lowercase();
+            let Some(a) = low.find(&format!("<{tag}")) else { break };
+            if !s.is_char_boundary(a) || a >= s.len() {
+                break;
+            }
+            let close = format!("</{tag}>");
+            let b = low[a..].find(&close).map(|i| a + i + close.len());
+            match b {
+                Some(b) if b <= s.len() && s.is_char_boundary(b) => s.replace_range(a..b, " "),
+                _ => {
+                    s.replace_range(a.., " ");
+                    break;
+                }
+            }
+        }
+    }
+    // 块级标签换成换行,其余标签去掉
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    let mut tag_buf = String::new();
+    for c in s.chars() {
+        if in_tag {
+            if c == '>' {
+                in_tag = false;
+                let t = tag_buf.trim_start_matches('/').to_lowercase();
+                if ["p", "div", "br", "li", "h1", "h2", "h3", "h4", "tr", "section", "article"]
+                    .iter()
+                    .any(|b| t == *b || t.starts_with(&format!("{b} ")))
+                {
+                    out.push('\n');
+                }
+            } else {
+                tag_buf.push(c);
+            }
+        } else if c == '<' {
+            in_tag = true;
+            tag_buf.clear();
+        } else {
+            out.push(c);
+        }
+    }
+    // 基础实体反解 + 压缩空行
+    let out = out
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    let mut lines: Vec<&str> = Vec::new();
+    let mut blank = false;
+    for l in out.lines() {
+        let t = l.trim();
+        if t.is_empty() {
+            if !blank && !lines.is_empty() {
+                lines.push("");
+            }
+            blank = true;
+        } else {
+            lines.push(t);
+            blank = false;
+        }
+    }
+    lines.join("\n")
+}
+
+/// 比赛设置里贴 URL 导入赛事文档:10s 超时,正文截断 200KB
+#[tauri::command]
+async fn fetch_event_doc(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let url = url.trim().to_string();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err("链接要以 http(s):// 开头".to_string());
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .into();
+        let mut resp = agent
+            .get(&url)
+            .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+            .call()
+            .map_err(|e| match e {
+                ureq::Error::StatusCode(c) => format!("页面返回 {c},抓不到内容;请手动复制正文粘贴"),
+                e => format!("抓取失败: {e};请手动复制正文粘贴"),
+            })?;
+        let body = resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| format!("读取页面失败: {e}"))?;
+        let text = html_to_text(&body);
+        // 公众号等反爬页:正文极短或提示「环境异常/验证」时按失败处理
+        if text.chars().count() < 60
+            || text.contains("环境异常")
+            || text.contains("完成验证")
+        {
+            return Err("页面疑似需要登录或有反爬(如微信公众号),抓不到正文;请打开原文手动复制粘贴".to_string());
+        }
+        // 截断到 200KB(按字符边界)
+        const MAX: usize = 200 * 1024;
+        if text.len() > MAX {
+            let mut cut = MAX;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            Ok(text[..cut].to_string())
+        } else {
+            Ok(text)
+        }
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1406,6 +2010,8 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
             let repo = git(&cwd, &["config", "--get", "remote.origin.url"])
                 .filter(|s| !s.is_empty())
                 .map(|u| normalize_repo(&u));
+            // 这里保留真实目录名:本地用量视图要给本人看得懂;
+            // 上云的匿名化在 sync_profile 构造 payload 时做
             let name = repo
                 .as_deref()
                 .and_then(|r| r.rsplit('/').next())
@@ -1482,12 +2088,29 @@ async fn sync_profile(
     api_key: String,
     days: u32,
     endpoint: Option<String>,
+    include_receipt: Option<bool>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let stats = collect_profile_stats(days.clamp(1, 365))?;
         let url =
             endpoint.unwrap_or_else(|| "https://hackertrip.space/api/desktop/stats".to_string());
-        let payload = serde_json::json!({
+        // 隐私口径「本地路径不出本机」:无远程仓库的项目名只在本地 UI 显示,
+        // 上云载荷里替换成短哈希占位——服务端仍可区分项目,但看不出目录叫什么
+        let projects: Vec<ProjectStat> = stats
+            .projects
+            .iter()
+            .cloned()
+            .map(|mut p| {
+                if p.repo.is_none() {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    p.name.hash(&mut h);
+                    p.name = format!("local-{:06x}", h.finish() & 0xFF_FFFF);
+                }
+                p
+            })
+            .collect();
+        let mut payload = serde_json::json!({
             "periodDays": stats.period_days,
             "totals": {
                 "tokens": stats.tokens,
@@ -1499,11 +2122,23 @@ async fn sync_profile(
             },
             "skills": stats.skills,
             "models": stats.models,
-            "projects": stats.projects,
+            "projects": projects,
             // 多来源(claude/codex)按模型细分,老服务端不认识该字段会自动忽略
             "sources": stats.sources,
             "clientVersion": env!("CARGO_PKG_VERSION"),
         });
+        // 用量回执(默认关闭,设置页明示授权后前端才传 true):
+        // 只含「接入了哪家供应商」的标识与已装 CLI 列表,消耗量服务端从 sources/models 推算
+        if include_receipt.unwrap_or(false) {
+            let providers: Vec<serde_json::Value> = ["claude", "codex"]
+                .iter()
+                .filter_map(|c| current_provider_value(c).ok())
+                .collect();
+            payload["receipt"] = serde_json::json!({
+                "providers": providers,
+                "clis": detected_clis(),
+            });
+        }
         let resp = ureq::post(&url)
             .header("Authorization", &format!("Bearer {}", api_key.trim()))
             .send_json(payload);
@@ -2015,6 +2650,11 @@ pub fn run() {
             plan_hackathon,
             ask_hackathon,
             available_clis,
+            provider_profiles,
+            apply_provider,
+            restore_provider,
+            current_provider,
+            fetch_event_doc,
             extract_work,
             push_work,
             rate_limits,

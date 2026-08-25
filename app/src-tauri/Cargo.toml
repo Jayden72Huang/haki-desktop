@@ -27,3 +27,8 @@ chrono = "0.4.45"
 tauri-plugin-notification = "2.3.3"
 ureq = { version = "3.4.0", features = ["json"] }
 
+
+# Dock/进程显示名:dev 下 cargo 的二进制名就是 macOS 看到的应用名
+[[bin]]
+name = "Haki"
+path = "src/main.rs"

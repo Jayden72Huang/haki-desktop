@@ -19,7 +19,7 @@
       <span class="brand-zone" id="pill-brand" title="展开面板">
         <span class="chev">›</span>
         <img class="brand-logo" src="/src/assets/logo.png" alt="" />
-        <span class="title" id="pill-title">HackerTrip</span>
+        <span class="title" id="pill-title">Haki 黑客松小助手</span>
       </span>
       <span class="spacer" data-tauri-drag-region></span>
       <span class="badge mono" id="pill-main" data-tauri-drag-region>—</span>
@@ -32,7 +32,7 @@
         <span class="brand-zone" id="panel-brand" title="收起面板">
           <span class="chev" id="collapse-btn">⌄</span>
           <img class="brand-logo" src="/src/assets/logo.png" alt="" />
-          <span class="title">HackerTrip</span>
+          <span class="title">Haki 黑客松小助手</span>
         </span>
         <span class="spacer" data-tauri-drag-region></span>
         <div class="seg" id="mode-seg">
@@ -123,6 +123,38 @@
           <img id="s-qr" class="qr" alt="绑定二维码" />
           <span class="sub">用小程序里的「扫码绑定」扫这个码,也可以手动输入左上方 6 位数字</span>
         </div>
+        <!-- 赞助商 Token 一键接入(设置常驻,日常/比赛模式均可进设置使用) -->
+        <div class="dist-card" id="tk-card">
+          <div class="dist-head">
+            <span class="dist-title">赞助商 Token 接入</span>
+            <span class="spacer"></span>
+            <span class="sub mono" id="tk-current">—</span>
+            <button class="action ghost" id="tk-toggle">接入</button>
+          </div>
+          <div id="tk-body" class="hidden">
+            <div class="form-row">
+              <select id="tk-provider" class="tk-sel"></select>
+              <select id="tk-cli" class="tk-sel" style="max-width: 140px">
+                <option value="claude">Claude Code</option>
+                <option value="codex">Codex</option>
+              </select>
+            </div>
+            <div class="row">
+              <span class="sub" id="tk-note">选择赞助商查看领取指引</span>
+              <span class="spacer"></span>
+              <span class="sub link" id="tk-keyurl">领取 Key ↗</span>
+            </div>
+            <div class="form-row">
+              <input id="tk-key" type="password" placeholder="粘贴 API Key(只写入本机 CLI 配置,不上传)" />
+              <button class="action" id="tk-apply">一键接入</button>
+            </div>
+            <div class="row">
+              <span class="sub" id="tk-status">接入前自动备份原配置,可随时还原</span>
+              <span class="spacer"></span>
+              <span class="sub link" id="tk-restore">还原官方配置</span>
+            </div>
+          </div>
+        </div>
         <div class="section-title">Haki 问答引擎(比赛模式)</div>
         <div class="row">
           <span class="label">Claude Code</span>
@@ -158,6 +190,14 @@
         <div class="form-row">
           <input id="s-synctoken" type="password" placeholder="同步密钥 uploadToken(交作品用)" />
           <button class="action" id="s-savesync">保存</button>
+        </div>
+        <div class="row">
+          <span class="label">用量回执授权</span>
+          <span class="spacer"></span>
+          <button class="action" id="s-consent">未授权 · 点击开启</button>
+        </div>
+        <div class="row">
+          <span class="sub">开启后,云同步会附带「接入的赞助商与对应消耗」的聚合回执,提供给你参加赛事的主办方;不含源码与对话,可随时关闭</span>
         </div>
         <div class="row">
           <span class="label">同步内容</span>
@@ -217,6 +257,10 @@
             <button class="chip" data-days="7">一周后 18:00</button>
           </div>
           <div class="form-row">
+            <input id="ev-doc-url" type="text" placeholder="贴赛事页/公告链接,自动抓取文档(可选)" />
+            <button class="action ghost" id="ev-doc-fetch">抓取</button>
+          </div>
+          <div class="form-row">
             <textarea
               id="ev-doc"
               rows="3"
@@ -243,7 +287,27 @@
           </div>
 
           <!-- 交作品:内嵌 toggle,不另开窗口 -->
-                    <div class="module-block" data-key="qa">
+                    <!-- 赞助商 Token:独立模块条目(领福利是开赛第一件事,默认排最前) -->
+          <div class="module-block" data-key="sp">
+            <div class="row toggle-head" data-mod="sp">
+              <span class="icon" style="background: rgba(255, 211, 77, 0.14)">⭐</span>
+              <span class="label strong">赞助商 Token</span>
+              <span class="sub" id="sp-tips">检测中…</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="sp-chev">›</span>
+            </div>
+            <div id="sp-body" class="hidden">
+              <div class="row"><span class="sub" id="sp-note">—</span></div>
+              <div class="row">
+                <span class="sub mono" id="sp-current">当前接入:—</span>
+                <span class="spacer"></span>
+                <button class="action" id="sp-go">去接入 →</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-key="qa">
             <div class="row toggle-head" data-mod="qa">
               <span class="icon" style="background: rgba(139, 79, 232, 0.22)">✦</span>
               <span class="label strong">Haki 提问</span>

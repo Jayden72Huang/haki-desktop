@@ -10,6 +10,15 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
+  // 多页构建:index=Tauri 正式应用,demo=浏览器可交互演示(嵌官网用)
+  build: {
+    rollupOptions: {
+      input: {
+        index: "index.html",
+        demo: "demo.html",
+      },
+    },
+  },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

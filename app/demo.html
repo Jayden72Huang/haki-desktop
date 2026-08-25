@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Haki 可交互演示</title>
+    <script type="module" src="/src/demo.ts" defer></script>
+  </head>
+
+  <body>
+    <!-- Haki 舞台:常驻在栏顶,永不被 render() 重写 -->
+    <div id="haki-stage" data-tauri-drag-region>
+      <div id="haki" class="haki-sprite"></div>
+    </div>
+
+    <!-- 收起态:胶囊条 -->
+    <div id="pill" class="pill" data-tauri-drag-region>
+      <span class="brand-zone" id="pill-brand" title="展开面板">
+        <span class="chev">›</span>
+        <img class="brand-logo" src="/src/assets/logo.png" alt="" />
+        <span class="title" id="pill-title">Haki 黑客松小助手</span>
+      </span>
+      <span class="spacer" data-tauri-drag-region></span>
+      <span class="badge mono" id="pill-main" data-tauri-drag-region>—</span>
+      <span class="badge green" id="pill-status" data-tauri-drag-region>读取中</span>
+    </div>
+
+    <!-- 展开态:面板 -->
+    <div id="panel" class="panel hidden" data-tauri-drag-region>
+      <div class="panel-header" data-tauri-drag-region>
+        <span class="brand-zone" id="panel-brand" title="收起面板">
+          <span class="chev" id="collapse-btn">⌄</span>
+          <img class="brand-logo" src="/src/assets/logo.png" alt="" />
+          <span class="title">Haki 黑客松小助手</span>
+        </span>
+        <span class="spacer" data-tauri-drag-region></span>
+        <div class="seg" id="mode-seg">
+          <button class="seg-btn" data-mode="daily">日常</button>
+          <button class="seg-btn" data-mode="hackathon">比赛</button>
+        </div>
+      </div>
+
+      <!-- 网站入口(浏览器打开) -->
+      <div class="tabs" data-tauri-drag-region>
+        <button class="tab" id="tab-miniprogram">官方小程序</button>
+        <button class="tab" data-url="https://hackertrip.space/explore">赛事 ↗</button>
+        <button class="tab" data-url="https://github.com/Jayden72Huang/haki-desktop">GitHub ↗</button>
+        <button class="tab" data-url="https://hackertrip.space/haki-desktop">指南 ↗</button>
+        <span class="spacer"></span>
+        <button class="tab" id="tab-usage">用量</button>
+        <button class="tab" id="tab-settings">设置</button>
+      </div>
+
+      <!-- 官方小程序码浮窗:扫码进小程序,引导去「发现」页 -->
+      <div id="mp-pop" class="mp-pop hidden">
+        <img class="mp-qr" src="/src/assets/miniprogram-qr.jpg" alt="HackerTrip 小程序码" />
+        <div class="mp-title">HackerTrip 官方小程序</div>
+        <div class="mp-sub">微信扫码打开 · 进入底部「发现」页浏览全部赛事</div>
+      </div>
+
+      <div id="panel-body" data-tauri-drag-region>
+
+      <!-- ============ Token 用量 ============ -->
+      <div id="usage-view" class="hidden">
+        <div class="quota-grid" id="u-quota"><div class="row"><span class="sub">读取额度中…</span></div></div>
+        <div class="quota-pager hidden" id="u-quota-pager"><span id="qp-dots"></span></div>
+        <div class="usage-divider"></div>
+        <div class="range-tabs" id="u-range">
+          <button class="range-btn" data-range="today">今天</button>
+          <button class="range-btn" data-range="7">7D</button>
+          <button class="range-btn" data-range="30">30D</button>
+          <button class="range-btn" data-range="90">90D</button>
+        </div>
+        <div class="stat-grid" id="u-stats"></div>
+        <!-- 今日分时用量柱状图(仅"今天"范围显示) -->
+        <div class="dist-card hidden" id="u-hourly-card">
+          <div class="dist-head">
+            <span class="dist-title">每小时趋势</span>
+            <span class="spacer"></span>
+            <span class="sub mono" id="u-hourly-max">—</span>
+          </div>
+          <div class="hour-chart" id="u-hourly"></div>
+          <div class="hour-axis mono"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span></div>
+        </div>
+        <div class="dist-card">
+          <div class="dist-head">
+            <span class="dist-title">用量分布</span>
+            <span class="spacer"></span>
+            <div class="range-tabs mini" id="u-dist-seg">
+              <button class="range-btn" data-dist="model">模型</button>
+              <button class="range-btn" data-dist="project">项目</button>
+            </div>
+          </div>
+          <div id="u-dist"></div>
+        </div>
+        <div class="row usage-foot">
+          <span class="sync-dot" id="u-sync-dot"></span>
+          <span class="sub" id="u-synced">—</span>
+          <span class="spacer"></span>
+          <button class="action" id="u-refresh">↻ 更新数据</button>
+        </div>
+      </div>
+
+      <!-- ============ 设置 ============ -->
+      <div id="settings-view" class="hidden">
+        <div class="section-title">账号绑定与云端同步</div>
+        <div class="row">
+          <button class="action" id="s-login">使用 GitHub 登录并绑定</button>
+          <span class="sub" id="s-login-status">未绑定</span>
+        </div>
+        <div class="row">
+          <button class="action" id="s-sync">立即同步到云端</button>
+          <span class="sub" id="s-sync-status">—</span>
+        </div>
+        <div class="section-title">小程序互绑</div>
+        <div class="row">
+          <button class="action" id="s-paircode">生成绑定二维码</button>
+          <span class="countdown mono" id="s-code">——</span>
+          <span class="sub">小程序「我的 → 绑定网站账号 → 扫码」,10 分钟有效</span>
+        </div>
+        <div class="row hidden" id="s-qr-row">
+          <img id="s-qr" class="qr" alt="绑定二维码" />
+          <span class="sub">用小程序里的「扫码绑定」扫这个码,也可以手动输入左上方 6 位数字</span>
+        </div>
+        <!-- 赞助商 Token 一键接入(设置常驻,日常/比赛模式均可进设置使用) -->
+        <div class="dist-card" id="tk-card">
+          <div class="dist-head">
+            <span class="dist-title">赞助商 Token 接入</span>
+            <span class="spacer"></span>
+            <span class="sub mono" id="tk-current">—</span>
+            <button class="action ghost" id="tk-toggle">接入</button>
+          </div>
+          <div id="tk-body" class="hidden">
+            <div class="form-row">
+              <select id="tk-provider" class="tk-sel"></select>
+              <select id="tk-cli" class="tk-sel" style="max-width: 140px">
+                <option value="claude">Claude Code</option>
+                <option value="codex">Codex</option>
+              </select>
+            </div>
+            <div class="row">
+              <span class="sub" id="tk-note">选择赞助商查看领取指引</span>
+              <span class="spacer"></span>
+              <span class="sub link" id="tk-keyurl">领取 Key ↗</span>
+            </div>
+            <div class="form-row">
+              <input id="tk-key" type="password" placeholder="粘贴 API Key(只写入本机 CLI 配置,不上传)" />
+              <button class="action" id="tk-apply">一键接入</button>
+            </div>
+            <div class="row">
+              <span class="sub" id="tk-status">接入前自动备份原配置,可随时还原</span>
+              <span class="spacer"></span>
+              <span class="sub link" id="tk-restore">还原官方配置</span>
+            </div>
+          </div>
+        </div>
+        <div class="section-title">Haki 问答引擎(比赛模式)</div>
+        <div class="row">
+          <span class="label">Claude Code</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-cli-claude">检测中…</span>
+          <button class="action ghost" data-open-url="https://claude.com/claude-code">安装指引 ↗</button>
+        </div>
+        <div class="row">
+          <span class="label">Codex CLI</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-cli-codex">检测中…</span>
+          <button class="action ghost" data-open-url="https://developers.openai.com/codex/cli">安装指引 ↗</button>
+        </div>
+        <div class="row">
+          <span class="label">Gemini CLI</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-cli-gemini">检测中…</span>
+          <button class="action ghost" data-open-url="https://github.com/google-gemini/gemini-cli">安装指引 ↗</button>
+        </div>
+        <div class="row">
+          <span class="sub">装有 CLI 时 Haki 用大模型答疑,没有则用本地文档检索(问答目前接入 Claude Code,其余接入中)</span>
+        </div>
+        <div class="section-title">Agent 列表显示字段</div>
+        <div id="field-toggles"></div>
+        <div class="section-title">高级</div>
+        <div class="form-row">
+          <input id="s-apikey" type="password" placeholder="也可手动粘贴 API Key(ht_live_ 开头)" />
+          <button class="action" id="s-savekey">保存</button>
+        </div>
+        <div class="form-row">
+          <input id="s-syncurl" type="text" placeholder="pairSync 触发器地址(交作品用)" />
+        </div>
+        <div class="form-row">
+          <input id="s-synctoken" type="password" placeholder="同步密钥 uploadToken(交作品用)" />
+          <button class="action" id="s-savesync">保存</button>
+        </div>
+        <div class="row">
+          <span class="label">用量回执授权</span>
+          <span class="spacer"></span>
+          <button class="action" id="s-consent">未授权 · 点击开启</button>
+        </div>
+        <div class="row">
+          <span class="sub">开启后,云同步会附带「接入的赞助商与对应消耗」的聚合回执,提供给你参加赛事的主办方;不含源码与对话,可随时关闭</span>
+        </div>
+        <div class="row">
+          <span class="label">同步内容</span>
+          <span class="spacer"></span>
+          <span class="sub">近 30 天:token 消耗 · skills 使用榜 · 各项目投入时长 · 关联仓库名</span>
+        </div>
+        <div class="row">
+          <span class="label">隐私</span>
+          <span class="spacer"></span>
+          <span class="sub">只上报统计特征与仓库名,源码/对话/本地路径不出本机</span>
+        </div>
+        <div class="row">
+          <span class="label">版本</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="s-version">—</span>
+        </div>
+        <div class="row">
+          <button class="action danger" id="s-quit">退出应用</button>
+        </div>
+      </div>
+
+      <!-- ============ 日常模式 ============ -->
+      <div id="daily-view">
+        <div class="row">
+          <span class="icon timer">✳</span>
+          <span class="label">今日 Agent 用量</span>
+          <span class="spacer"></span>
+          <span class="sub mono" id="d-tokens">—</span>
+        </div>
+        <div class="section-title">运行中的 Coding Agent</div>
+        <div id="agent-list"><div class="row"><span class="sub">检测中…</span></div></div>
+        <div class="section-title">今日开发数据</div>
+        <div id="repo-list"><div class="row"><span class="sub">统计中…</span></div></div>
+        <div class="row">
+          <button class="action" id="summary-btn">生成今日 AI 总结</button>
+          <span class="sub">每晚 22:00 也会自动提醒</span>
+        </div>
+        <div id="summary-out" class="summary hidden"></div>
+      </div>
+
+      <!-- ============ 比赛模式 ============ -->
+      <div id="hackathon-view" class="hidden">
+        <!-- 未配置比赛:设置表单 -->
+        <div id="event-form">
+          <div class="section-title">设置当前比赛</div>
+          <div class="form-row">
+            <input id="ev-name" type="text" placeholder="比赛名称,如 AdventureX 2026" />
+          </div>
+          <div class="form-row">
+            <label class="sub">提交截止</label>
+            <input id="ev-end" type="datetime-local" />
+          </div>
+          <div class="form-row" id="ev-end-quick">
+            <button class="chip" data-days="0">今晚 24:00</button>
+            <button class="chip" data-days="1">明天 18:00</button>
+            <button class="chip" data-days="3">3 天后 18:00</button>
+            <button class="chip" data-days="7">一周后 18:00</button>
+          </div>
+          <div class="form-row">
+            <input id="ev-doc-url" type="text" placeholder="贴赛事页/公告链接,自动抓取文档(可选)" />
+            <button class="action ghost" id="ev-doc-fetch">抓取</button>
+          </div>
+          <div class="form-row">
+            <textarea
+              id="ev-doc"
+              rows="3"
+              placeholder="粘贴主办方赛事文档 / 群公告(可选)。贴了就能自动排出赛程节点、并在比赛中随时问它细节"
+            ></textarea>
+          </div>
+          <div class="form-row">
+            <button class="action" id="ev-save">开始比赛</button>
+            <span class="sub" id="ev-plan-hint"></span>
+          </div>
+        </div>
+
+        <!-- 已配置比赛:作战面板 -->
+        <div id="event-live" class="hidden">
+          <div class="row" style="flex-wrap: wrap">
+            <span class="icon timer">◷</span>
+            <div style="flex: 1">
+              <div style="display: flex; align-items: baseline; gap: 10px">
+                <span class="countdown mono" id="h-countdown">—</span>
+                <span class="sub">距作品提交截止</span>
+              </div>
+              <div class="phases" id="h-phases"></div>
+            </div>
+          </div>
+
+          <!-- 交作品:内嵌 toggle,不另开窗口 -->
+                    <!-- 赞助商 Token:独立模块条目(领福利是开赛第一件事,默认排最前) -->
+          <div class="module-block" data-key="sp">
+            <div class="row toggle-head" data-mod="sp">
+              <span class="icon" style="background: rgba(255, 211, 77, 0.14)">⭐</span>
+              <span class="label strong">赞助商 Token</span>
+              <span class="sub" id="sp-tips">检测中…</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="sp-chev">›</span>
+            </div>
+            <div id="sp-body" class="hidden">
+              <div class="row"><span class="sub" id="sp-note">—</span></div>
+              <div class="row">
+                <span class="sub mono" id="sp-current">当前接入:—</span>
+                <span class="spacer"></span>
+                <button class="action" id="sp-go">去接入 →</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-key="qa">
+            <div class="row toggle-head" data-mod="qa">
+              <span class="icon" style="background: rgba(139, 79, 232, 0.22)">✦</span>
+              <span class="label strong">Haki 提问</span>
+              <span class="sub" id="qa-tips">token 在哪领?交作品到哪?随时问</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="qa-chev">›</span>
+            </div>
+            <div id="qa-body" class="hidden">
+              <div class="form-row">
+                <input id="h-ask" type="text" placeholder="赞助商 token 在哪领?作品交到哪?" />
+                <button class="action ghost" id="h-ask-go">问</button>
+              </div>
+              <div id="h-ask-out" class="summary hidden"></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-key="ms">
+            <div class="row toggle-head" data-mod="ms">
+              <span class="icon" style="background: rgba(77, 225, 255, 0.14)">◷</span>
+              <span class="label strong">赛程节点</span>
+              <span class="sub" id="ms-tips">—</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="ms-chev">›</span>
+            </div>
+            <div id="ms-body" class="hidden">
+              <div id="h-milestones"></div>
+              <div class="row"><span class="spacer"></span><span class="sub link" id="h-replan">重新规划</span></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-key="cl">
+            <div class="row toggle-head" data-mod="cl">
+              <span class="icon" style="background: rgba(46, 216, 136, 0.14)">✓</span>
+              <span class="label strong">交付清单</span>
+              <span class="sub" id="cl-tips">—</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="cl-chev">›</span>
+            </div>
+            <div id="cl-body" class="hidden">
+              <div id="checklist"></div>
+            </div>
+          </div>
+
+          <div class="submit-block" data-key="work">
+            <div class="row toggle-head" id="work-toggle">
+              <span class="icon" style="background: rgba(124, 93, 255, 0.22)">⇪</span>
+              <span class="label strong">交作品</span>
+              <span class="sub" id="work-hint">把项目文件夹拖进来自动提取</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="work-chev">›</span>
+            </div>
+            <div id="work-body" class="hidden">
+              <div id="work-drop" class="dropzone">
+                把项目文件夹拖到这里
+                <div class="sub">读 README / package.json / git 记录,交给本地 CLI 提炼</div>
+              </div>
+              <div id="work-form" class="hidden">
+                <div class="form-row">
+                  <input id="w-name" type="text" placeholder="作品名(必填)" />
+                </div>
+                <div class="form-row">
+                  <textarea id="w-summary" rows="2" placeholder="一句话讲清做了什么、解决什么问题"></textarea>
+                </div>
+                <div class="form-row">
+                  <input id="w-repo" type="text" placeholder="仓库链接 https://" />
+                </div>
+                <div class="form-row">
+                  <input id="w-demo" type="text" placeholder="在线 demo 链接 https://" />
+                </div>
+                <div class="form-row">
+                  <input id="w-stack" type="text" placeholder="技术栈,逗号分隔" />
+                </div>
+                <div class="form-row">
+                  <input id="w-paircode" type="text" maxlength="6" placeholder="配对码 6 位" style="max-width: 110px" />
+                  <span class="sub">小程序「我的 → Skills 同步」生成</span>
+                </div>
+                <div class="form-row">
+                  <button class="action" id="w-submit">提交到 HackerTrip</button>
+                  <span class="sub link" id="w-redo">重新提取</span>
+                  <span class="spacer"></span>
+                  <span class="sub" id="w-status"></span>
+                </div>
+                <div class="form-row hidden" id="w-xhs-row">
+                  <button class="action ghost" id="w-xhs">生成小红书文案</button>
+                  <span class="sub">生成后复制并唤起小红书</span>
+                </div>
+                <div id="w-xhs-out" class="summary hidden"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-key="repo">
+            <div class="row toggle-head" data-mod="repo">
+              <span class="icon" style="background: rgba(248, 150, 74, 0.16)">⇅</span>
+              <span class="label strong">项目进度</span>
+              <span class="sub" id="repo-tips">绑定仓库后展示真实 commit/push</span>
+              <span class="spacer"></span>
+              <span class="mod-drag" title="按住上下拖动排序">⋮⋮</span>
+              <span class="chev-sm" id="repo-chev">›</span>
+            </div>
+            <div id="repo-body" class="hidden">
+              <div class="row">
+                <span class="sub">绑定参赛仓库,commit 与 push 记录实时入档</span>
+                <span class="spacer"></span>
+                <span class="sub link" id="h-repo-bind">绑定仓库</span>
+              </div>
+              <div id="h-repo-bindbox" class="hidden">
+                <div class="form-row">
+                  <select id="h-repo-select"></select>
+                  <button class="action" id="h-repo-save">绑定</button>
+                </div>
+              </div>
+              <div id="h-repo-box">
+                <div class="row">
+                  <span class="icon" style="background: rgba(255, 255, 255, 0.08)">✳</span>
+                  <span class="label">本场 Agent 用量</span>
+                  <span class="spacer"></span>
+                  <span class="sub mono" id="h-tokens">—</span>
+                </div>
+                <div class="row">
+                  <span class="icon check" id="h-commit-icon">✓</span>
+                  <span class="label" id="h-repo-name">最近 commit</span>
+                  <span class="sub" id="h-commit">—</span>
+                  <span class="spacer"></span>
+                  <span class="badge mono" id="h-commit-count">—</span>
+                </div>
+                <div id="h-commits"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <span class="sub link" id="ev-edit">修改比赛信息</span>
+            <span class="spacer"></span>
+            <span class="sub link" id="ev-finish">结束比赛</span>
+          </div>
+        </div>
+      </div>
+
+      </div><!-- /panel-body -->
+    </div>
+  </body>
+</html>

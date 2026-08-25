@@ -1176,3 +1176,51 @@ textarea:focus {
   color: var(--mut);
   line-height: 1.5;
 }
+
+/* Token 接入选择器 */
+.tk-sel {
+  flex: 1;
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+/* 数据授权开关的开启态 */
+.action.consent-on {
+  background: rgba(46, 216, 136, 0.14);
+  color: var(--success);
+  border-color: rgba(46, 216, 136, 0.4);
+}
+
+/* 本场赞助商 Token 横幅 */
+.sponsor-row {
+  cursor: pointer;
+  border: 1px solid rgba(255, 211, 77, 0.35);
+  background: linear-gradient(100deg, rgba(255, 211, 77, 0.08), rgba(248, 150, 74, 0.06));
+  border-radius: 12px;
+  padding: 8px 14px;
+  margin: 2px 0 8px;
+}
+.sponsor-row:hover {
+  border-color: rgba(255, 211, 77, 0.6);
+}
+.sponsor-row .sponsor-star {
+  margin-right: 8px;
+}
+.sponsor-row .label b {
+  color: var(--warn-yellow);
+}
+
+/* 品牌副标题:HackerTrip · Haki 黑客松小助手 */
+.subtitle {
+  font-size: 11px;
+  color: var(--mut);
+  white-space: nowrap;
+  margin-left: -4px; /* 与主标题贴近一点 */
+  align-self: flex-end;
+  padding-bottom: 2px;
+}

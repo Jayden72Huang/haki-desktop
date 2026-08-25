@@ -425,7 +425,7 @@ function renderPill() {
       status.className = "badge green";
     }
   } else {
-    $("pill-title").textContent = "HackerTrip";
+    $("pill-title").textContent = "Haki 黑客松小助手";
     $("pill-main").textContent = usage ? `今日 ${fmt(usageTotal(usage))} tokens` : "今日 —";
     const status = $("pill-status");
     const n = agents.length;
@@ -499,6 +499,135 @@ function quotaBar(label: string, pct: number | undefined, resetAt: string, note?
     <div class="qbar"><div class="qbar-fill ${level}" style="width:${Math.min(100, p)}%"></div></div>
     <span class="qpct mono ${level}">${p}%</span>
   </div>`;
+}
+
+/* ---------- 赞助商 Token 一键接入(cc-switch 式,标准功能) ---------- */
+interface TkProvider {
+  id: string;
+  name: string;
+  base_url?: string;
+  key_url?: string;
+  note?: string;
+  target_cli?: string;
+  /// 品牌位:赛事赞助商置顶推荐(P0-1)
+  sponsored?: boolean;
+  sponsor_note?: string;
+}
+/// 后端 provider_profiles 未就绪时的兜底清单(id 与后端约定一致)
+const TK_FALLBACK: TkProvider[] = [
+  { id: "zhipu", name: "智谱 GLM", key_url: "https://open.bigmodel.cn", note: "赛事常见赞助商,领 key 后选 Claude Code 接入" },
+  { id: "kimi", name: "Kimi (Moonshot)", key_url: "https://platform.moonshot.cn", note: "支持 Anthropic 兼容端点" },
+  { id: "deepseek", name: "DeepSeek", key_url: "https://platform.deepseek.com", note: "性价比高,适合跑量" },
+  { id: "qwen", name: "通义 Qwen", key_url: "https://bailian.console.aliyun.com", note: "阿里云百炼领取" },
+];
+let tkProviders: TkProvider[] = [];
+let tkBackendReady = false;
+
+async function tkLoad() {
+  try {
+    tkProviders = await invoke<TkProvider[]>("provider_profiles");
+    tkBackendReady = true;
+  } catch {
+    tkProviders = TK_FALLBACK;
+    tkBackendReady = false;
+  }
+  // 品牌位:赛事赞助商排最前并带 ⭐ 标识
+  tkProviders.sort((a, b) => Number(!!b.sponsored) - Number(!!a.sponsored));
+  const sel = $("tk-provider") as HTMLSelectElement;
+  sel.innerHTML = tkProviders
+    .map((p) => `<option value="${esc(p.id)}">${p.sponsored ? "⭐ " : ""}${esc(p.name)}${p.sponsored ? " · 赛事推荐" : ""}</option>`)
+    .join("");
+  tkSyncNote();
+  void tkSyncCurrent();
+  // 比赛面板「赞助商 Token」模块:tips 与领取指引同步
+  const sp = tkProviders.find((p) => p.sponsored);
+  $("sp-tips").textContent = sp ? `${sp.name} · 赛事推荐` : "本场暂无 Token 赞助";
+  $("sp-note").textContent = sp
+    ? sp.sponsor_note || sp.note || "本场赞助商已配置,点「去接入」一键写入 CLI"
+    : "赛事配置赞助商后,这里会显示专属领取指引";
+}
+
+function tkSel(): TkProvider | undefined {
+  return tkProviders.find((p) => p.id === ($("tk-provider") as HTMLSelectElement).value);
+}
+
+function tkSyncNote() {
+  const p = tkSel();
+  // sponsor_note 后端默认空串(非 Option),用 || 兜底而不是 ??
+  $("tk-note").textContent = p?.sponsor_note || p?.note || "选择赞助商查看领取指引";
+  $("tk-keyurl").classList.toggle("hidden", !p?.key_url);
+}
+
+interface TkCurrent {
+  cli: string;
+  base_url: string | null;
+  provider_id?: string | null;
+  name?: string | null;
+}
+
+async function tkSyncCurrent() {
+  const cli = ($("tk-cli") as HTMLSelectElement).value;
+  try {
+    const cur = await invoke<TkCurrent>("current_provider", { cli });
+    // base_url 为 null = 官方默认;codex 只认托管块,手工改的第三方端点也会是 null
+    const curText = cur?.base_url ? (cur.name || cur.provider_id || "第三方端点") : "官方默认";
+    $("tk-current").textContent = curText;
+    const spCur = document.getElementById("sp-current");
+    if (spCur) spCur.textContent = `当前接入:${curText}`;
+  } catch {
+    $("tk-current").textContent = tkBackendReady ? "—" : "引擎待后端就绪";
+  }
+}
+
+async function tkApply() {
+  const btn = $("tk-apply") as HTMLButtonElement;
+  const key = ($("tk-key") as HTMLInputElement).value.trim();
+  const p = tkSel();
+  const status = $("tk-status");
+  if (!p) return;
+  if (!key) {
+    status.textContent = "先粘贴 API Key";
+    return;
+  }
+  // 改 CLI 配置是敏感操作:二段确认,3 秒内不确认自动还原按钮
+  if (btn.dataset.confirm !== "1") {
+    btn.dataset.confirm = "1";
+    btn.textContent = "确认写入配置?";
+    setTimeout(() => {
+      btn.dataset.confirm = "";
+      btn.textContent = "一键接入";
+    }, 3000);
+    return;
+  }
+  btn.dataset.confirm = "";
+  btn.textContent = "接入中…";
+  btn.disabled = true;
+  try {
+    const cli = ($("tk-cli") as HTMLSelectElement).value;
+    const msg = await invoke<string>("apply_provider", { cli, providerId: p.id, apiKey: key });
+    status.textContent = `${msg || `已接入 ${p.name}`} · ${cli === "claude" ? "重启 claude 会话生效" : "新开 codex 会话生效"}`;
+    ($("tk-key") as HTMLInputElement).value = "";
+    void tkSyncCurrent();
+  } catch (e) {
+    status.textContent = tkBackendReady
+      ? `接入失败:${String(e).slice(0, 100)}`
+      : "配置引擎开发中,后端更新后此按钮自动可用";
+  }
+  btn.textContent = "一键接入";
+  btn.disabled = false;
+  await fitWindow();
+}
+
+async function tkRestore() {
+  const status = $("tk-status");
+  try {
+    const cli = ($("tk-cli") as HTMLSelectElement).value;
+    const msg = await invoke<string>("restore_provider", { cli });
+    status.textContent = msg || "已还原官方配置";
+    void tkSyncCurrent();
+  } catch (e) {
+    status.textContent = tkBackendReady ? `还原失败:${String(e).slice(0, 100)}` : "配置引擎开发中,暂无可还原的记录";
+  }
 }
 
 function renderUsage() {
@@ -1278,13 +1407,20 @@ async function askHackathon() {
   if (!q) return;
   const out = $("h-ask-out");
   out.classList.remove("hidden");
+  input.value = "";
 
-  // 有 claude 在跑必然装了 CLI;标记过 missing 且没看到 CLI 进程就不再白试
+  // 路由:本地检索优先(秒回);文档里没有,再请本地 agent CLI;CLI 也没有才兜底话术
+  const hit = searchDocLocally(q);
+  if (hit) {
+    out.textContent = hit;
+    await fitWindow();
+    return;
+  }
+
   const claudeRunning = agents.some((a) => a.agent === "claude");
   const tryCli = cliQaState() !== "missing" || claudeRunning;
-
   if (tryCli) {
-    out.textContent = "Haki 思考中…";
+    out.textContent = "文档里没直接写,Haki 请本地 agent 想想…";
     await fitWindow();
     try {
       const ans = await invoke<string>("ask_hackathon", {
@@ -1295,22 +1431,18 @@ async function askHackathon() {
       });
       store.set("cliQa", "ok");
       out.textContent = ans;
-      input.value = "";
       await fitWindow();
       return;
     } catch (e) {
-      // 没装 CLI → 记住,之后直接走本地检索;其他错误(超时/额度)本次也降级
       if (String(e).includes("确认已安装")) store.set("cliQa", "missing");
     }
   }
 
-  // 本地检索兜底:FAQ 意图 + 句子打分,秒回
-  const hit = searchDocLocally(q);
-  out.innerHTML = `${esc(hit ?? fallbackAnswer())}${cliQaState() === "missing" ? guideHtml() : ""}`;
+  out.innerHTML = `${esc(fallbackAnswer())}${cliQaState() === "missing" ? guideHtml() : ""}`;
   bindGuideLink(out);
-  input.value = "";
   await fitWindow();
 }
+
 
 /* ---------- 交作品 ---------- */
 /// Tauri 的拖放事件走窗口级 API,HTML5 的 drop 事件在 webview 里拿不到真实路径
@@ -1550,7 +1682,12 @@ async function syncNow(silent: boolean) {
   btn.disabled = true;
   if (!silent) $("s-sync-status").textContent = "聚合数据并上报中…";
   try {
-    await invoke<string>("sync_profile", { apiKey, days: 30, endpoint: null });
+    await invoke<string>("sync_profile", {
+      apiKey,
+      days: 30,
+      endpoint: null,
+      includeReceipt: store.get<boolean>("consentReceipt", false),
+    });
     store.set("lastSyncAt", new Date().toISOString());
     store.set("lastSyncDay", new Date().toISOString().slice(0, 10));
     updateSyncStatus();
@@ -1629,6 +1766,19 @@ window.addEventListener("DOMContentLoaded", () => {
     $("mp-pop").classList.add("hidden");
     $("tab-miniprogram").classList.remove("active");
   });
+  $("sp-go").addEventListener("click", () => {
+    showSettings = true;
+    showUsage = false;
+    renderFieldToggles();
+    render();
+    if ($("tk-body").classList.contains("hidden")) {
+      $("tk-body").classList.remove("hidden");
+      ($("tk-toggle") as HTMLButtonElement).textContent = "收起";
+      void tkLoad();
+    }
+    $("tk-card").scrollIntoView({ behavior: "smooth", block: "center" });
+    void fitWindow();
+  });
   $("tab-usage").addEventListener("click", () => {
     showUsage = !showUsage;
     showSettings = false;
@@ -1656,6 +1806,22 @@ window.addEventListener("DOMContentLoaded", () => {
   quotaEl.addEventListener("pointerdown", (e) => { qDrag = { x: e.clientX, left: quotaEl.scrollLeft }; });
   window.addEventListener("pointermove", (e) => { if (qDrag) quotaEl.scrollLeft = qDrag.left - (e.clientX - qDrag.x); });
   window.addEventListener("pointerup", () => { qDrag = null; });
+  // Token 接入:开合/选择联动/接入/还原
+  $("tk-toggle").addEventListener("click", () => {
+    const opening = $("tk-body").classList.contains("hidden");
+    $("tk-body").classList.toggle("hidden", !opening);
+    ($("tk-toggle") as HTMLButtonElement).textContent = opening ? "收起" : "接入";
+    if (opening) void tkLoad();
+    void fitWindow();
+  });
+  $("tk-provider").addEventListener("change", tkSyncNote);
+  $("tk-cli").addEventListener("change", () => void tkSyncCurrent());
+  $("tk-keyurl").addEventListener("click", () => {
+    const u = tkSel()?.key_url;
+    if (u) void openUrl(u);
+  });
+  $("tk-apply").addEventListener("click", () => void tkApply());
+  $("tk-restore").addEventListener("click", () => void tkRestore());
   $("u-refresh").addEventListener("click", () => {
     void refreshLimits();
     void refreshUsage();
@@ -1698,6 +1864,18 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll<HTMLButtonElement>("[data-open-url]").forEach((b) => {
     b.addEventListener("click", () => void openUrl(b.dataset.openUrl!));
   });
+  // 数据授权:用量回执同步开关(P0-1,默认关闭,明示授权)
+  const renderConsent = () => {
+    const on = store.get<boolean>("consentReceipt", false);
+    const btn = $("s-consent") as HTMLButtonElement;
+    btn.textContent = on ? "已授权 · 点击关闭" : "未授权 · 点击开启";
+    btn.classList.toggle("consent-on", on);
+  };
+  renderConsent();
+  $("s-consent").addEventListener("click", () => {
+    store.set("consentReceipt", !store.get<boolean>("consentReceipt", false));
+    renderConsent();
+  });
   $("s-quit").addEventListener("click", () => void getCurrentWindow().close());
   void invoke<Record<string, string>>("app_meta")
     .then((m) => ($("s-version").textContent = `v${m.version}`))
@@ -1732,6 +1910,27 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   $("summary-btn").addEventListener("click", () => void generateSummary());
+  // 贴赛事页链接自动抓正文,免手工复制
+  $("ev-doc-fetch").addEventListener("click", async () => {
+    const u = ($("ev-doc-url") as HTMLInputElement).value.trim();
+    const hint = $("ev-plan-hint");
+    if (!u) return;
+    const btn = $("ev-doc-fetch") as HTMLButtonElement;
+    btn.textContent = "抓取中…";
+    btn.disabled = true;
+    try {
+      const text = await invoke<string>("fetch_event_doc", { url: u });
+      ($("ev-doc") as HTMLTextAreaElement).value = text;
+      hint.textContent = `已抓取 ${text.length} 字,可直接开始比赛`;
+      hint.classList.remove("hint-error");
+    } catch (e) {
+      hint.textContent = String(e).slice(0, 120);
+      hint.classList.add("hint-error");
+    }
+    btn.textContent = "抓取";
+    btn.disabled = false;
+    void fitWindow();
+  });
   $("ev-save").addEventListener("click", () => void saveEvent());
   // 截止时间快捷按钮:点一下填好选择器(今晚=23:59,其余当天 18:00)
   document.querySelectorAll<HTMLButtonElement>("#ev-end-quick .chip").forEach((btn) => {
@@ -1747,7 +1946,7 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   });
   // 比赛面板模块排序:按住 ⋮⋮ 上下拖动。纯 pointer 事件驱动,只在拖动瞬间工作,无常驻开销
-  const MOD_DEFAULT = ["qa", "ms", "cl", "work", "repo"];
+  const MOD_DEFAULT = ["sp", "qa", "ms", "cl", "work", "repo"];
   const modBlocks = () =>
     [...document.querySelectorAll<HTMLElement>("#event-live [data-key]")];
   const applyModOrder = () => {
@@ -1880,6 +2079,7 @@ window.addEventListener("DOMContentLoaded", () => {
   void refreshUsage();
   void refreshAgents();
   void refreshLimits();
+  void tkLoad();
   setInterval(() => void refreshUsage(), 60_000); // 用量/仓库:每分钟
   setInterval(() => void refreshLimits(), 300_000); // 额度快照:每 5 分钟
   setInterval(() => void refreshAgents(), 15_000); // agent 进程:每 15 秒

@@ -8,6 +8,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import QRCode from "qrcode";
 import { initHaki, setHakiInputs } from "./haki";
+import { initGigFeed } from "./gigs";
 
 /* ---------- 类型 ---------- */
 interface ProjectToday {
@@ -153,6 +154,27 @@ const store = {
     localStorage.removeItem(key);
   },
 };
+
+/* ---------- 接单模式 GigFeed(方案 §4.2:只读公域订单+本地匹配,默认关) ---------- */
+let gigFeed: { render(visible: boolean): void } | null = null;
+
+function initGigFeedPanel() {
+  gigFeed = initGigFeed({
+    host: $("gig-feed"),
+    settingsHost: $("gig-settings"),
+    store,
+    // 本地信号只用已有数据:交作品草稿的技术栈 + 今日各项目活跃时间。不读取、不上传其他本地内容
+    getSignals: () => ({
+      works: workDraft?.techStack?.length ? [{ techStack: workDraft.techStack }] : [],
+      activity: usage?.per_project ?? [],
+    }),
+    openUrl,
+    onChange: () => {
+      gigFeed?.render(!showSettings && !showUsage);
+      void fitWindow();
+    },
+  });
+}
 
 /* ---------- 全局状态 ---------- */
 let mode: Mode = store.get<Mode>("mode", "daily");
@@ -420,6 +442,7 @@ function render() {
   $("usage-view").classList.toggle("hidden", !showUsage);
   $("daily-view").classList.toggle("hidden", overlay || mode !== "daily");
   $("hackathon-view").classList.toggle("hidden", overlay || mode !== "hackathon");
+  gigFeed?.render(!overlay); // 接单机会:两种主视图下方都可见,设置/用量层打开时隐藏
   document.querySelectorAll<HTMLButtonElement>(".seg-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.mode === mode);
   });
@@ -2225,6 +2248,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   initHaki();
+  initGigFeedPanel();
   hakiSync();
   void setExpanded(false);
   void refreshUsage();

@@ -1,3 +1,13 @@
+/* GigFeed reuses the existing dark card, badge and button tokens. */
+.gig-feed { padding-bottom: 8px; }
+.gig-card { overflow-wrap: anywhere; }
+.gig-card .dist-title { margin: 0; }
+.gig-budget { margin: 10px 0; color: var(--sub); font-size: 14px; }
+.gig-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.gig-reasons { margin: 10px 0 12px; padding-left: 18px; line-height: 1.7; }
+.gig-settings { margin: 12px 0; }
+.gig-settings > .sub { line-height: 1.6; }
+
 /* HackerTrip 桌面助手 —— 主题与小程序保持一致
    bg #000 · surface rgba(255,255,255,.055) · text #F2EEF5 · sub #C4BECC · mut #948E9E
    品牌渐变 #F8964A → #F0557E → #8B4FE8 · success #2ED888 · urgent #FF5D4D */

@@ -1224,3 +1224,11 @@ textarea:focus {
   align-self: flex-end;
   padding-bottom: 2px;
 }
+
+/* 赞助商模块品牌图 */
+.sp-logo-img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  border-radius: 4px;
+}

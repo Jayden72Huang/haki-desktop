@@ -7,7 +7,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import QRCode from "qrcode";
-import { initHaki, setHakiInputs, setHakiPaused } from "./haki";
+import { initHaki, setHakiInputs } from "./haki";
 
 /* ---------- 类型 ---------- */
 interface ProjectToday {
@@ -76,6 +76,7 @@ interface AgentStatus {
   status: "running" | "needs_input" | "done";
   last_task: string;
   last_ts: string;
+  session_id: string;
 }
 interface RepoToday {
   path: string;
@@ -166,6 +167,7 @@ let showUsage = false;
 /// vibe-usage daemon 落盘的额度快照(claude/codex 两家 schema 不同,按原样透传)
 let limits: Record<string, any> = {};
 const openRows = new Set<string>();
+const focusErrors = new Map<string, string>();
 let fields = { ...DEFAULT_FIELDS, ...store.get<Partial<Record<FieldKey, boolean>>>("fields", {}) };
 let workOpen = false;
 let workDraft: WorkDraft | null = null;
@@ -183,12 +185,13 @@ const DEFAULT_CHECKLIST = ["线上 demo 可访问", "README 补齐运行说明",
 /* ---------- 窗口尺寸 ---------- */
 /// Haki 舞台条高度。展开态 scrollHeight 已包含 stage,只抬上限,勿再叠加
 const STAGE_H = 44;
+const WINDOW_W = 760;
 let lastFitH = 0; // 高度没变就不发 setSize IPC:render 每 15s 跑一次,窗口操作是跨进程调用
 async function fitWindow() {
   const h = expanded ? Math.min(document.body.scrollHeight + 12, 620 + STAGE_H) : 64 + STAGE_H;
   if (h === lastFitH) return;
   lastFitH = h;
-  await getCurrentWindow().setSize(new LogicalSize(660, h));
+  await getCurrentWindow().setSize(new LogicalSize(WINDOW_W, h));
 }
 
 /* ---------- Haki 输入同步 ---------- */
@@ -242,7 +245,7 @@ async function refreshAgents() {
         .filter((a) => a.cwd)
         .map(async (a) => {
           try {
-            statuses[a.cwd!] = await invoke<AgentStatus>("agent_status", {
+            statuses[agentKey(a)] = await invoke<AgentStatus>("agent_status", {
               cwd: a.cwd,
               agent: a.agent,
             });
@@ -353,13 +356,22 @@ function agentLogo(agent: string): string {
 /* ---------- agent 行状态与展示 ---------- */
 type DotState = "running" | "confirm" | "done-new" | "done-seen";
 
+function agentKey(a: AgentProc): string {
+  return `${a.agent}:${a.cwd ?? a.pid}`;
+}
+
+function statusFor(a: AgentProc): AgentStatus | undefined {
+  return agentStatus[agentKey(a)];
+}
+
 function dotState(a: AgentProc): DotState {
-  const st = a.cwd ? agentStatus[a.cwd] : undefined;
+  const st = statusFor(a);
   if (!st) return "running"; // 无会话信息(如 codex),进程在即视为运行中
   if (st.status === "running") return "running";
   if (st.status === "needs_input") return "confirm";
   const viewed = store.get<Record<string, string>>("viewedAt", {});
-  return a.cwd && viewed[a.cwd] && viewed[a.cwd] >= st.last_ts ? "done-seen" : "done-new";
+  const key = agentKey(a);
+  return viewed[key] && viewed[key] >= st.last_ts ? "done-seen" : "done-new";
 }
 
 const DOT_LABEL: Record<DotState, string> = {
@@ -374,12 +386,29 @@ function durationText(p: ProjectToday): string {
   return min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
 }
 
-function markViewed(cwd: string) {
-  const st = agentStatus[cwd];
+function markViewed(key: string) {
+  const st = agentStatus[key];
   if (!st) return;
   const viewed = store.get<Record<string, string>>("viewedAt", {});
-  viewed[cwd] = st.last_ts;
+  viewed[key] = st.last_ts;
   store.set("viewedAt", viewed);
+}
+
+/** 已完成置顶并按完成时间倒序；其余活跃会话排在后面。 */
+function sortedAgents(): AgentProc[] {
+  const updatedAt = (a: AgentProc): number => {
+    const statusTs = Date.parse(statusFor(a)?.last_ts ?? "");
+    if (Number.isFinite(statusTs)) return statusTs;
+    const projectTs = usage?.per_project.find((p) => p.cwd === a.cwd)?.last_ts;
+    const fallbackTs = Date.parse(projectTs ?? "");
+    return Number.isFinite(fallbackTs) ? fallbackTs : 0;
+  };
+  return [...agents].sort((a, b) => {
+    const aDone = statusFor(a)?.status === "done";
+    const bDone = statusFor(b)?.status === "done";
+    if (aDone !== bDone) return aDone ? -1 : 1;
+    return updatedAt(b) - updatedAt(a) || b.pid - a.pid;
+  });
 }
 
 /* ---------- 渲染 ---------- */
@@ -428,7 +457,7 @@ function renderPill() {
     $("pill-title").textContent = "Haki 黑客松小助手";
     $("pill-main").textContent = usage ? `今日 ${fmt(usageTotal(usage))} tokens` : "今日 —";
     const status = $("pill-status");
-    const n = agents.length;
+    const n = agents.filter((a) => dotState(a) === "running").length;
     status.textContent = n > 0 ? `${n} 个 agent 运行中` : "无 agent 运行";
     status.className = n > 0 ? "badge green" : "badge";
   }
@@ -512,6 +541,8 @@ interface TkProvider {
   /// 品牌位:赛事赞助商置顶推荐(P0-1)
   sponsored?: boolean;
   sponsor_note?: string;
+  /// 赞助商品牌图 URL(云端配置,空则用内置品牌标)
+  logo?: string;
 }
 /// 后端 provider_profiles 未就绪时的兜底清单(id 与后端约定一致)
 const TK_FALLBACK: TkProvider[] = [
@@ -521,6 +552,7 @@ const TK_FALLBACK: TkProvider[] = [
   { id: "qwen", name: "通义 Qwen", key_url: "https://bailian.console.aliyun.com", note: "阿里云百炼领取" },
 ];
 let tkProviders: TkProvider[] = [];
+let spProvider: TkProvider | null = null; // 本场赛事赞助商(sponsored 置顶项)
 let tkBackendReady = false;
 
 async function tkLoad() {
@@ -539,12 +571,19 @@ async function tkLoad() {
     .join("");
   tkSyncNote();
   void tkSyncCurrent();
-  // 比赛面板「赞助商 Token」模块:tips 与领取指引同步
-  const sp = tkProviders.find((p) => p.sponsored);
-  $("sp-tips").textContent = sp ? `${sp.name} · 赛事推荐` : "本场暂无 Token 赞助";
-  $("sp-note").textContent = sp
-    ? sp.sponsor_note || sp.note || "本场赞助商已配置,点「去接入」一键写入 CLI"
-    : "赛事配置赞助商后,这里会显示专属领取指引";
+  // 比赛面板「赞助商 Token」模块:logo/名称/指引同步,领取与接入都在模块内完成
+  spProvider = tkProviders.find((p) => p.sponsored) ?? null;
+  $("sp-tips").textContent = spProvider ? `${spProvider.name} · 赛事赞助` : "本场暂无 Token 赞助";
+  $("sp-name").textContent = spProvider ? spProvider.name : "等待赛事配置赞助商";
+  $("sp-note").textContent = spProvider
+    ? spProvider.sponsor_note || spProvider.note || "输入参赛编号领取分配的 API Key,一键写入 CLI"
+    : "主办方配置赞助商后,这里会显示品牌与专属领取方式";
+  // 品牌图:云端 logo 优先,否则用内置品牌矢量标,再兜底 ⭐
+  $("sp-logo").innerHTML = spProvider?.logo
+    ? `<img src="${esc(spProvider.logo)}" class="sp-logo-img" alt="" />`
+    : spProvider
+      ? agentLogo(spProvider.id)
+      : "⭐";
 }
 
 function tkSel(): TkProvider | undefined {
@@ -822,12 +861,12 @@ function renderDaily() {
   if (agents.length === 0) {
     al.innerHTML = `<div class="row"><span class="sub">当前没有检测到运行中的 coding agent</span></div>`;
   } else {
-    al.innerHTML = agents
+    al.innerHTML = sortedAgents()
       .map((a) => {
-        const key = `${a.agent}:${a.cwd ?? a.pid}`;
+        const key = agentKey(a);
         const state = dotState(a);
         const p = usage?.per_project.find((x) => x.cwd === a.cwd);
-        const st = a.cwd ? agentStatus[a.cwd] : undefined;
+        const st = statusFor(a);
         const open = openRows.has(key);
 
         // 主行右侧:改动优先(它比 token 更能说明这个会话干了什么)
@@ -854,16 +893,18 @@ function renderDaily() {
           ? `<span class="agent-task ${task ? "" : "muted"}">${esc(task || "暂无任务记录")}</span>`
           : "";
 
+        const focusError = focusErrors.get(key);
         const detail = open
           ? `<div class="agent-detail">
                <div class="detail-line"><span class="detail-k">完整任务</span>${esc(st?.last_task || "(暂无任务记录)")}</div>
                <div class="detail-line"><span class="detail-k">目录</span><span class="mono">${esc(a.cwd ?? "—")}</span></div>
                <div class="detail-line"><span class="detail-k">分支</span><span class="mono">${esc(a.branch ?? "—")}</span></div>
                <div class="detail-line"><span class="detail-k">状态</span>${DOT_LABEL[state]}</div>
+               ${focusError ? `<div class="detail-line hint-error"><span class="detail-k">跳转</span>${esc(focusError)}</div>` : ""}
              </div>`
           : "";
         return `
-      <div class="agent-row" data-key="${esc(key)}" data-cwd="${esc(a.cwd ?? "")}">
+      <div class="agent-row" data-key="${esc(key)}" data-cwd="${esc(a.cwd ?? "")}" data-pid="${a.pid}" data-session-id="${esc(st?.session_id ?? "")}" role="button" tabindex="0" title="点击跳转到对应终端；右侧箭头展开详情">
         <div class="row agent-main">
           <span class="dot ${state}"></span>
           ${agentLogo(a.agent)}
@@ -878,15 +919,47 @@ function renderDaily() {
       })
       .join("");
     al.querySelectorAll<HTMLElement>(".agent-row").forEach((el) => {
-      el.addEventListener("click", () => {
+      const toggleDetail = () => {
         const key = el.dataset.key!;
         if (openRows.has(key)) {
           openRows.delete(key);
         } else {
           openRows.add(key);
-          if (el.dataset.cwd) markViewed(el.dataset.cwd); // 展开即视为已查看
         }
         render();
+      };
+      el.querySelector<HTMLElement>(".chev-sm")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleDetail();
+      });
+      const focusTerminal = async () => {
+        const chevron = el.querySelector<HTMLElement>(".chev-sm");
+        const oldChevron = chevron?.textContent ?? "›";
+        if (chevron) chevron.textContent = "↗";
+        try {
+          await invoke<string>("focus_agent_terminal", {
+            pid: Number(el.dataset.pid),
+            cwd: el.dataset.cwd ?? "",
+            sessionId: el.dataset.sessionId ?? "",
+          });
+          focusErrors.delete(el.dataset.key!);
+          markViewed(el.dataset.key!);
+          render();
+        } catch (error) {
+          const message = `终端跳转失败：${String(error).slice(0, 100)}`;
+          focusErrors.set(el.dataset.key!, message);
+          openRows.add(el.dataset.key!);
+          render();
+          console.error(message);
+        } finally {
+          if (chevron?.isConnected && chevron.textContent === "↗") chevron.textContent = oldChevron;
+        }
+      };
+      el.addEventListener("click", () => void focusTerminal());
+      el.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        void focusTerminal();
       });
     });
   }
@@ -1701,7 +1774,6 @@ async function syncNow(silent: boolean) {
 /* ---------- 展开/收起 ---------- */
 async function setExpanded(next: boolean) {
   expanded = next;
-  setHakiPaused(next); // 面板展开时小人定格,收起后继续动
   $("pill").classList.toggle("hidden", expanded);
   $("panel").classList.toggle("hidden", !expanded);
   render();
@@ -1766,7 +1838,86 @@ window.addEventListener("DOMContentLoaded", () => {
     $("mp-pop").classList.add("hidden");
     $("tab-miniprogram").classList.remove("active");
   });
-  $("sp-go").addEventListener("click", () => {
+  // 赞助商 Token 模块:领取 → 一键接入 → 还原,全程不离开比赛面板
+  $("sp-claim").addEventListener("click", async () => {
+    const status = $("sp-status");
+    if (!spProvider) {
+      status.textContent = "本场暂无赞助商配置,可在设置里手动接入其他供应商";
+      return;
+    }
+    const code = ($("sp-code") as HTMLInputElement).value.trim();
+    if (!code) {
+      status.textContent = "先输入参赛编号";
+      return;
+    }
+    const btn = $("sp-claim") as HTMLButtonElement;
+    btn.textContent = "领取中…";
+    btn.disabled = true;
+    try {
+      const resp = await invoke<{ api_key?: string; apiKey?: string; note?: string }>("claim_sponsor_token", {
+        code,
+        providerId: spProvider.id,
+      });
+      const key = resp?.api_key || resp?.apiKey || "";
+      if (key) {
+        ($("sp-key") as HTMLInputElement).value = key;
+        status.textContent = `已领取 ${spProvider.name} 的 Key${resp?.note ? ` · ${resp.note}` : ""},点「一键接入」写入 CLI`;
+      } else {
+        status.textContent = "领取响应里没有 Key,请联系主办方";
+      }
+    } catch (e) {
+      status.textContent = String(e).slice(0, 90);
+    }
+    btn.textContent = "领取";
+    btn.disabled = false;
+  });
+  $("sp-apply").addEventListener("click", async () => {
+    const status = $("sp-status");
+    const key = ($("sp-key") as HTMLInputElement).value.trim();
+    if (!spProvider) {
+      status.textContent = "本场暂无赞助商配置";
+      return;
+    }
+    if (!key) {
+      status.textContent = "先领取或粘贴 API Key";
+      return;
+    }
+    const btn = $("sp-apply") as HTMLButtonElement;
+    if (btn.dataset.confirm !== "1") {
+      btn.dataset.confirm = "1";
+      btn.textContent = "确认写入配置?";
+      setTimeout(() => {
+        btn.dataset.confirm = "";
+        btn.textContent = "一键接入";
+      }, 3000);
+      return;
+    }
+    btn.dataset.confirm = "";
+    btn.textContent = "接入中…";
+    btn.disabled = true;
+    const cli = spProvider.target_cli || "claude";
+    try {
+      const msg = await invoke<string>("apply_provider", { cli, providerId: spProvider.id, apiKey: key });
+      status.textContent = `${msg} · ${cli === "claude" ? "重启 claude 会话生效" : "新开 codex 会话生效"}`;
+      ($("sp-key") as HTMLInputElement).value = "";
+      void tkSyncCurrent();
+    } catch (e) {
+      status.textContent = `接入失败:${String(e).slice(0, 80)}`;
+    }
+    btn.textContent = "一键接入";
+    btn.disabled = false;
+  });
+  $("sp-restore").addEventListener("click", async () => {
+    const status = $("sp-status");
+    try {
+      const msg = await invoke<string>("restore_provider", { cli: spProvider?.target_cli || "claude" });
+      status.textContent = msg || "已还原官方配置";
+      void tkSyncCurrent();
+    } catch (e) {
+      status.textContent = `还原失败:${String(e).slice(0, 80)}`;
+    }
+  });
+  $("sp-more").addEventListener("click", () => {
     showSettings = true;
     showUsage = false;
     renderFieldToggles();

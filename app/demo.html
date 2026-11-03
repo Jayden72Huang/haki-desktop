@@ -227,7 +227,7 @@
           <span class="spacer"></span>
           <span class="sub mono" id="d-tokens">—</span>
         </div>
-        <div class="section-title">运行中的 Coding Agent</div>
+        <div class="section-title">Coding Agent 任务</div>
         <div id="agent-list"><div class="row"><span class="sub">检测中…</span></div></div>
         <div class="section-title">今日开发数据</div>
         <div id="repo-list"><div class="row"><span class="sub">统计中…</span></div></div>
@@ -298,11 +298,26 @@
               <span class="chev-sm" id="sp-chev">›</span>
             </div>
             <div id="sp-body" class="hidden">
-              <div class="row"><span class="sub" id="sp-note">—</span></div>
               <div class="row">
-                <span class="sub mono" id="sp-current">当前接入:—</span>
+                <span class="logo-tile" id="sp-logo">⭐</span>
+                <span class="label strong" id="sp-name">—</span>
                 <span class="spacer"></span>
-                <button class="action" id="sp-go">去接入 →</button>
+                <span class="sub mono" id="sp-current">当前接入:—</span>
+              </div>
+              <div class="row"><span class="sub" id="sp-note">—</span></div>
+              <div class="form-row">
+                <input id="sp-code" type="text" placeholder="输入参赛编号,自动领取分配给你的 API Key" />
+                <button class="action" id="sp-claim">领取</button>
+              </div>
+              <div class="form-row">
+                <input id="sp-key" type="password" placeholder="或手动粘贴主办方发的 API Key" />
+                <button class="action" id="sp-apply">一键接入</button>
+              </div>
+              <div class="row">
+                <span class="sub" id="sp-status">接入前自动备份原配置,可随时还原</span>
+                <span class="spacer"></span>
+                <span class="sub link" id="sp-restore">还原</span>
+                <span class="sub link" id="sp-more">更多供应商</span>
               </div>
             </div>
           </div>

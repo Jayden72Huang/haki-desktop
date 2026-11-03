@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Hardened Runtime 下的最小权限集:Haki 不用 App Sandbox(要读 ~/.claude、~/.codex 并调用 claude/codex CLI) -->
+  <!-- 允许通过 osascript 控制其他 App(跳转终端会话),对应 Info.plist 的 NSAppleEventsUsageDescription -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+  <!-- WKWebView JIT:Tauri 前端在 Hardened Runtime 下需要 -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <!-- 允许加载未被同一 Team 签名的动态库(部分 Rust crate/系统插件需要),不影响公证 -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- 网络客户端(ureq 拉取赞助配置 / 赛事数据) -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+</dict>
+</plist>

@@ -41,7 +41,6 @@ const ANIMS: Record<HakiState, AnimDef> = {
   sleep: { url: sleepUrl, frames: 4, fps: 1.2, fw: 40, fh: 40 },
 };
 
-const STAGE_W = 660;
 const EDGE_PAD = 12;
 const SPEED = 28; // px/s 巡航速度
 const WALK_MIN = 0.35, WALK_MAX = 0.65; // 单次行走距离占可行走宽度比例
@@ -81,7 +80,11 @@ type Walk = { fromX: number; dist: number; dur: number; t0: number } | null;
 let walk: Walk = null;
 let pauseUntil = 0;
 
-const usable = (s: HakiState) => STAGE_W - ANIMS[s].fw - 2 * EDGE_PAD;
+/** 舞台跟随窗口宽度，面板加宽后小人仍能走满整条顶栏。 */
+const usable = (s: HakiState) => {
+  const stageWidth = document.getElementById("haki-stage")?.clientWidth || 660;
+  return stageWidth - ANIMS[s].fw - 2 * EDGE_PAD;
+};
 
 /* ---------- 状态机 ---------- */
 function resolveState(i: HakiInputs): HakiState {

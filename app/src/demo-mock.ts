@@ -78,7 +78,7 @@ const rateLimits = {
 };
 
 const providers = [
-  { id: "zhipu", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/anthropic", target_cli: "claude", key_url: "https://open.bigmodel.cn", model: "glm-4.7", note: "", sponsored: true, sponsor_note: "AdventureX 2026 参赛选手专属:凭参赛码到 2 楼签到台领取 API Key" },
+  { id: "glm-claude", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/anthropic", target_cli: "claude", key_url: "https://open.bigmodel.cn", model: "glm-4.7", note: "", sponsored: true, sponsor_note: "AdventureX 2026 参赛选手专属:凭参赛码到 2 楼签到台领取 API Key" },
   { id: "kimi", name: "Kimi (Moonshot)", base_url: "https://api.moonshot.cn/anthropic", target_cli: "claude", key_url: "https://platform.moonshot.cn", model: "kimi-k2", note: "支持 Anthropic 兼容端点", sponsored: false, sponsor_note: "" },
   { id: "deepseek", name: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", target_cli: "claude", key_url: "https://platform.deepseek.com", model: "deepseek-chat", note: "性价比高,适合跑量", sponsored: false, sponsor_note: "" },
   { id: "qwen", name: "通义 Qwen", base_url: "https://dashscope.aliyuncs.com", target_cli: "claude", key_url: "https://bailian.console.aliyun.com", model: "qwen3-coder", note: "阿里云百炼领取", sponsored: false, sponsor_note: "" },
@@ -123,7 +123,7 @@ function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknow
     case "provider_profiles": return Promise.resolve(providers);
     case "current_provider": return Promise.resolve({ ...demoProvider, cli: String(args?.cli ?? "claude") });
     case "apply_provider": {
-      const p = providers.find((x) => x.id === args?.providerId);
+      const p = providers.find((x) => x.id === args?.providerId) ?? providers[0];
       demoProvider = { cli: String(args?.cli ?? "claude"), base_url: p?.base_url ?? null, provider_id: p?.id ?? null, name: p?.name ?? null };
       return Promise.resolve(`已接入 ${p?.name ?? "供应商"}(演示环境,未写入任何真实配置;备份 settings.json.haki-bak-demo)`);
     }
@@ -137,6 +137,8 @@ function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknow
     }
     case "fetch_event_doc":
       return new Promise((r) => setTimeout(() => r("AdventureX 2026 参赛须知:赞助商 Token 领取:2 楼签到台。作品提交:hackertrip.space/submit,截止 8月24日 18:00,需 GitHub 仓库 + 3 分钟 Demo 视频。路演每队 2 分钟。"), 700));
+    case "claim_sponsor_token":
+      return new Promise((r) => setTimeout(() => r({ api_key: "glm-demo-" + String(args?.code ?? "").slice(0, 6) + "-8f3kx2", note: "有效期至赛事结束" }), 600));
     case "app_meta": return Promise.resolve({ version: "0.1.0-demo" });
     case "sync_profile": return Promise.resolve('{"ok":true}');
     default:

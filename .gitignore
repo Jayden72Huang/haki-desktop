@@ -3,3 +3,7 @@ dist/
 target/
 .DS_Store
 .gstack/
+output/signing/*.key
+output/signing/*.p12
+output/signing/*.p8
+output/release/

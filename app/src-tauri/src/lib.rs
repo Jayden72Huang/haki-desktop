@@ -456,6 +456,12 @@ pub struct AgentStatus {
     /// 正在执行/最近一次的任务(最后一条用户指令)
     pub last_task: String,
     pub last_ts: String,
+    /// CLI 的真实会话 ID，用于在 Vibeyard 中精确选中对应终端标签
+    pub session_id: String,
+}
+
+fn system_time_rfc3339(time: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()
 }
 
 fn encode_project_dir(cwd: &str) -> String {
@@ -613,7 +619,8 @@ fn codex_status(cwd: &str) -> Result<AgentStatus, String> {
     Ok(AgentStatus {
         status: status.to_string(),
         last_task,
-        last_ts: String::new(),
+        last_ts: system_time_rfc3339(mtime),
+        session_id: sid,
     })
 }
 
@@ -718,6 +725,12 @@ fn agent_status(cwd: String, agent: Option<String>) -> Result<AgentStatus, Strin
     let last_ts = entries
         .last()
         .and_then(|v| v["timestamp"].as_str())
+        .filter(|ts| !ts.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| system_time_rfc3339(mtime));
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
 
@@ -725,6 +738,7 @@ fn agent_status(cwd: String, agent: Option<String>) -> Result<AgentStatus, Strin
         status: status.to_string(),
         last_task,
         last_ts,
+        session_id,
     })
 }
 
@@ -865,6 +879,147 @@ fn running_agents() -> Result<Vec<AgentProc>, String> {
         });
     }
     Ok(found)
+}
+
+#[cfg(target_os = "macos")]
+fn is_vibeyard_descendant(pid: u32) -> bool {
+    let mut current = pid;
+    for _ in 0..16 {
+        let Ok(out) = Command::new("ps")
+            .args(["-p", &current.to_string(), "-o", "ppid=,command="])
+            .output()
+        else {
+            return false;
+        };
+        let line = String::from_utf8_lossy(&out.stdout);
+        let line = line.trim();
+        let Some(split_at) = line.find(char::is_whitespace) else {
+            return false;
+        };
+        let parent = line[..split_at].trim().parse::<u32>().unwrap_or(0);
+        let command = line[split_at..].trim();
+        if command.contains("/Vibeyard.app/") {
+            return true;
+        }
+        if parent <= 1 || parent == current {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// 通过 Vibeyard 暴露的 macOS 辅助功能属性精确选择项目和 CLI 会话。
+/// 不读取其他进程环境；项目路径与会话 ID 都来自现有 Agent 列表/会话日志。
+#[cfg(target_os = "macos")]
+fn focus_vibeyard_session(cwd: &str, session_id: &str) -> Result<String, String> {
+    let cwd_js = serde_json::to_string(cwd).map_err(|e| e.to_string())?;
+    let session_js = serde_json::to_string(session_id).map_err(|e| e.to_string())?;
+    let script = format!("const cwd = {cwd_js};\nconst sessionId = {session_js};\n")
+        + r#"
+const systemEvents = Application("System Events");
+const matches = systemEvents.processes.whose({ name: "Vibeyard" })();
+if (!matches.length) throw new Error("Vibeyard 未运行");
+const process = matches[0];
+process.frontmost = true;
+const windows = process.windows();
+if (!windows.length) throw new Error("Vibeyard 没有可用窗口");
+const window = windows[0];
+
+function safe(call, fallback = "") {
+  try { return call(); } catch (_) { return fallback; }
+}
+function role(element) { return String(safe(() => element.role())); }
+function name(element) { return String(safe(() => element.name())); }
+function attribute(element, key) {
+  return String(safe(() => element.attributes.byName(key).value()));
+}
+function actionNames(element) {
+  return safe(() => element.actions().map((action) => String(action.name())), []);
+}
+function press(element) {
+  element.actions.byName("AXPress").perform();
+}
+function frame(element) {
+  const position = safe(() => element.position(), [0, 0]);
+  const size = safe(() => element.size(), [0, 0]);
+  return { x: position[0], y: position[1], w: size[0], h: size[1] };
+}
+
+let contents = window.entireContents();
+const projectPaths = contents
+  .filter((element) => role(element) === "AXStaticText")
+  .map((element) => ({ element, path: name(element) }))
+  .filter(({ path }) => path && (cwd === path || cwd.startsWith(path + "/")))
+  .sort((a, b) => b.path.length - a.path.length);
+if (!projectPaths.length) throw new Error("Vibeyard 中未找到该项目");
+
+const pathElement = projectPaths[0].element;
+const pathFrame = frame(pathElement);
+const centerX = pathFrame.x + pathFrame.w / 2;
+const centerY = pathFrame.y + pathFrame.h / 2;
+const projectCards = contents
+  .filter((element) => actionNames(element).includes("AXPress"))
+  .map((element) => ({ element, box: frame(element) }))
+  .filter(({ box }) => box.w > 0 && box.h > 0 && centerX >= box.x && centerX <= box.x + box.w && centerY >= box.y && centerY <= box.y + box.h)
+  .sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h);
+if (!projectCards.length) throw new Error("无法选中 Vibeyard 项目卡片");
+press(projectCards[0].element);
+delay(0.25);
+
+if (!sessionId) throw new Error("该任务缺少 CLI 会话 ID，请等待列表刷新后重试");
+contents = window.entireContents();
+const tab = contents.find((element) => {
+  const classList = attribute(element, "AXDOMClassList");
+  const description = attribute(element, "AXDescription");
+  return classList.includes("tab-item") && description.includes(sessionId) && actionNames(element).includes("AXPress");
+});
+if (!tab) throw new Error("Vibeyard 中未找到对应终端标签");
+press(tab);
+process.frontmost = true;
+"session";
+"#;
+
+    let output = Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &script])
+        .output()
+        .map_err(|e| format!("无法调用 macOS 自动化：{e}"))?;
+    if output.status.success() {
+        return Ok("已跳转到 Vibeyard 对应终端".into());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("-1719") || stderr.contains("assistive access") {
+        return Err("请在 系统设置 → 隐私与安全性 → 辅助功能 中允许 Haki / HackerTrip".into());
+    }
+    if stderr.contains("not authorized") || stderr.contains("不被允许") || stderr.contains("-1743")
+    {
+        return Err("请在 系统设置 → 隐私与安全性 → 自动化 中允许 Haki / HackerTrip 控制 System Events".into());
+    }
+    Err(if stderr.is_empty() {
+        "Vibeyard 终端跳转失败".into()
+    } else {
+        stderr
+    })
+}
+
+/// 点击 Agent 任务时，跳到承载该进程的精确终端会话。
+#[tauri::command]
+fn focus_agent_terminal(pid: u32, cwd: String, session_id: String) -> Result<String, String> {
+    if cwd.trim().is_empty() {
+        return Err("该 Agent 没有可识别的工作目录".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if is_vibeyard_descendant(pid) {
+            return focus_vibeyard_session(&cwd, &session_id);
+        }
+        return Err("当前仅支持精确跳转 Vibeyard 内嵌终端".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, session_id);
+        Err("当前系统暂不支持终端窗口跳转".into())
+    }
 }
 
 /// 某个 git 仓库的今日开发数据
@@ -1223,6 +1378,8 @@ pub struct ProviderEntry {
     pub sponsored: bool,
     /// 赛事专属领取指引文案
     pub sponsor_note: String,
+    /// 赞助商品牌图 URL(云端/本地配置,空串走前端内置品牌标)
+    pub logo: String,
 }
 
 /// sponsors.json 条目:按 id 覆写内置项(字段可省略),或带齐 name/base_url/target_cli 追加新端点
@@ -1241,6 +1398,8 @@ struct SponsorOverride {
     model: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    #[serde(default)]
+    logo: Option<String>,
     #[serde(default)]
     sponsored: Option<bool>,
     #[serde(default)]
@@ -1299,6 +1458,7 @@ fn merged_profiles(refresh_remote: bool) -> Vec<ProviderEntry> {
             note: p.note.into(),
             sponsored: false,
             sponsor_note: String::new(),
+            logo: String::new(),
         })
         .collect();
     // 合并顺序:内置清单 → 远端缓存 → 本地手改(sponsors.json 永远最后应用,现场手改必胜)
@@ -1337,6 +1497,9 @@ fn merged_profiles(refresh_remote: bool) -> Vec<ProviderEntry> {
                 if let Some(v) = o.sponsor_note {
                     e.sponsor_note = v;
                 }
+                if let Some(v) = o.logo {
+                    e.logo = v;
+                }
             } else if let (Some(name), Some(base_url), Some(target_cli)) =
                 (o.name, o.base_url, o.target_cli)
             {
@@ -1350,6 +1513,7 @@ fn merged_profiles(refresh_remote: bool) -> Vec<ProviderEntry> {
                     note: o.note.unwrap_or_default(),
                     sponsored: o.sponsored.unwrap_or(false),
                     sponsor_note: o.sponsor_note.unwrap_or_default(),
+                    logo: o.logo.unwrap_or_default(),
                 });
             }
         }
@@ -1357,6 +1521,32 @@ fn merged_profiles(refresh_remote: bool) -> Vec<ProviderEntry> {
     // 赞助商置顶,其余保持原顺序(stable sort)
     list.sort_by_key(|e| !e.sponsored);
     list
+}
+
+/// 参赛编号领取分配的 API Key。云端接口未上线时返回可操作的错误文案。
+#[tauri::command]
+async fn claim_sponsor_token(code: String, provider_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(6)))
+            .build()
+            .into();
+        let resp = agent
+            .post("https://hackertrip.space/api/desktop/token-claim")
+            .send_json(serde_json::json!({ "code": code.trim(), "providerId": provider_id }));
+        match resp {
+            Ok(mut r) => {
+                let text = r.body_mut().read_to_string().map_err(|e| e.to_string())?;
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .map_err(|_| "领取服务响应异常,请联系主办方或手动粘贴 Key".to_string())
+            }
+            Err(ureq::Error::StatusCode(404)) => Err("该赛事的自动发放未开通,请向主办方领取 Key 后手动粘贴".into()),
+            Err(ureq::Error::StatusCode(c)) => Err(format!("领取失败({c}),检查参赛编号是否正确")),
+            Err(_) => Err("网络异常,稍后重试或手动粘贴 Key".into()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 赞助商端点清单(含品牌位热配置),前端渲染选择列表
@@ -2644,6 +2834,7 @@ pub fn run() {
             usage_today,
             running_agents,
             agent_status,
+            focus_agent_terminal,
             dev_today,
             repo_commits,
             ai_daily_summary,
@@ -2651,6 +2842,7 @@ pub fn run() {
             ask_hackathon,
             available_clis,
             provider_profiles,
+            claim_sponsor_token,
             apply_provider,
             restore_provider,
             current_provider,

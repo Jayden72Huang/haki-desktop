@@ -1,3 +1,4 @@
+import {costDisplay,type ModelUsage} from "./usage-cost";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -31,6 +32,7 @@ interface SourceUsage {
   total: number;
   sessions: number;
   models: ModelStat[];
+  model_usage?: ModelUsage[];
 }
 interface UsageToday {
   input: number;
@@ -46,6 +48,7 @@ interface UsageToday {
   sources: SourceUsage[];
   /// 今日分时用量:本地时区 24 小时分桶,含全部来源
   hourly?: number[];
+  active_minutes?: number;
 }
 interface AgentProc {
   agent: string;
@@ -53,6 +56,7 @@ interface AgentProc {
   cwd: string | null;
   project: string | null;
   branch: string | null;
+  git_available?: boolean;
   dirty_files: number;
   insertions: number;
   deletions: number;
@@ -231,7 +235,10 @@ function hakiSync() {
 }
 
 /* ---------- 数据刷新 ---------- */
+let usagePending = false;
 async function refreshUsage() {
+  if (usagePending) return;
+  usagePending = true;
   try {
     usage = await invoke<UsageToday>("usage_today");
     repos = await invoke<RepoToday[]>("dev_today", { paths: usage.projects });
@@ -239,6 +246,7 @@ async function refreshUsage() {
   } catch (e) {
     console.error(e);
   }
+  usagePending = false;
   render();
 }
 
@@ -257,7 +265,10 @@ async function refreshLimits() {
   render();
 }
 
+let agentsPending = false;
 async function refreshAgents() {
+  if (agentsPending) return;
+  agentsPending = true;
   try {
     agents = await invoke<AgentProc[]>("running_agents");
     const statuses: Record<string, AgentStatus> = {};
@@ -279,6 +290,8 @@ async function refreshAgents() {
     agentStatus = statuses;
   } catch (e) {
     console.error(e);
+  } finally {
+    agentsPending = false;
   }
   hakiSync();
   render();
@@ -487,11 +500,6 @@ function renderPill() {
 }
 
 /* ---------- Token 用量视图 ---------- */
-/// API 牌价估算(USD/MTok),与 scripts/claude-usage.mjs 同口径;codex 按 GPT-5 档。仅作参考。
-const EST_PRICE: Record<string, { i: number; o: number; cw: number; cr: number }> = {
-  claude: { i: 15, o: 75, cw: 18.75, cr: 1.5 },
-  codex: { i: 1.25, o: 10, cw: 0, cr: 0.125 },
-};
 
 interface ProfileStats {
   period_days: number;
@@ -512,22 +520,25 @@ let distTab: "model" | "project" = "model";
 /// 7D/30D/90D 聚合结果缓存,切换范围时按需拉取
 const profiles: Partial<Record<UsageRange, ProfileStats>> = {};
 
+const profilePending = new Set<UsageRange>();
+const profileFetchedAt: Partial<Record<UsageRange, number>> = {};
+const profileErrors: Partial<Record<UsageRange, string>> = {};
 async function ensureProfile(r: UsageRange) {
-  if (r === "today" || profiles[r]) return;
+  if (r === "today" || profilePending.has(r)) return;
+  if (profiles[r] && Date.now() - (profileFetchedAt[r] ?? 0) < 60_000) return;
+  profilePending.add(r);
+  delete profileErrors[r];
   try {
     profiles[r] = await invoke<ProfileStats>("profile_stats", { days: Number(r) });
-  } catch (e) {
-    console.error(e);
+    profileFetchedAt[r] = Date.now();
+  } catch {
+    profileErrors[r] = "读取失败，点击刷新重试";
+  } finally {
+    profilePending.delete(r);
+    render();
   }
-  render();
 }
 
-function estCost(sources: SourceUsage[]): number {
-  return sources.reduce((sum, s) => {
-    const p = EST_PRICE[s.source] ?? EST_PRICE.claude;
-    return sum + (s.input * p.i + s.output * p.o + s.cache_write * p.cw + s.cache_read * p.cr) / 1e6;
-  }, 0);
-}
 
 function fmtResetAt(ts: number | string | undefined): string {
   if (!ts) return "";
@@ -698,6 +709,11 @@ function renderUsage() {
   const cx = limits.codex;
   // Gemini:vibeusage 式配额百分比(每模型一条),凭证问题给出可操作的提示
   const gm = limits.gemini;
+  const quotaNote = (status: string | undefined, provider: string) =>
+    status === "expired" ? "上次额度已过期，运行对应 CLI 后刷新" :
+    status === "error" ? "额度读取失败，请稍后刷新" :
+    status === "ok" ? "当前账号未提供此时间窗口的额度" :
+    provider === "claude" ? (cl?.configured ? "Claude 尚未提供此额度窗口" : "尚未接入 Claude 状态栏额度") : "暂无额度事件，运行 Codex 后刷新";
   const gmBody =
     gm?.status === "ok" && gm.buckets?.length
       ? gm.buckets
@@ -724,17 +740,17 @@ function renderUsage() {
         ${cx?.planLabel ? `<span class="badge mono">${esc(cx.planLabel)}</span>` : ""}</div>
       ${
         cx?.fiveHourNotEnforced
-          ? quotaBar("5h", undefined, "", "官方当前未启用")
-          : quotaBar("5h", cx?.fiveHour?.utilization, fmtResetAt(cx?.fiveHour?.resetsAt))
+          ? quotaBar("5h", undefined, "", "未提供 5h 窗口")
+          : quotaBar("5h", cx?.fiveHour?.utilization, fmtResetAt(cx?.fiveHour?.resetsAt), quotaNote(cx?.status, "codex"))
       }
-      ${quotaBar("7d", cx?.sevenDay?.utilization, fmtResetAt(cx?.sevenDay?.resetsAt))}
+      ${quotaBar("7d", cx?.sevenDay?.utilization, fmtResetAt(cx?.sevenDay?.resetsAt), quotaNote(cx?.status, "codex"))}
     </div>`,
     `<div class="quota-card">
       <div class="qhead"><span class="logo-tile">${agentLogo("claude")}</span><span class="qname">Claude</span>
         <span class="spacer"></span>
         ${cl?.model_id ? `<span class="badge mono">${esc(String(cl.model_id).replace(/^claude-/, ""))}</span>` : ""}</div>
-      ${quotaBar("5h", cl?.five_hour?.used_percentage, fmtResetAt(cl?.five_hour?.resets_at))}
-      ${quotaBar("7d", cl?.seven_day?.used_percentage, fmtResetAt(cl?.seven_day?.resets_at))}
+      ${quotaBar("5h", cl?.five_hour?.used_percentage, fmtResetAt(cl?.five_hour?.resets_at), quotaNote(cl?.status, "claude"))}
+      ${quotaBar("7d", cl?.seven_day?.used_percentage, fmtResetAt(cl?.seven_day?.resets_at), quotaNote(cl?.status, "claude"))}
     </div>`,
     `<div class="quota-card">
       <div class="qhead"><span class="logo-tile">${agentLogo("gemini")}</span><span class="qname">Gemini</span>
@@ -765,21 +781,16 @@ function renderUsage() {
 
   // ── 统计卡 ──
   if ((usageRange === "today" && !usage) || loading) {
-    $("u-stats").innerHTML = `<div class="row"><span class="sub">统计中…</span></div>`;
+    $("u-stats").innerHTML = `<div class="row"><span class="sub">${profileErrors[usageRange] ?? "统计中…"}</span></div>`;
   } else {
     const total = usageRange === "today" ? usageTotal(usage!) : (p?.tokens ?? 0);
     const cacheRead = srcs.reduce((s, x) => s + x.cache_read, 0);
-    const activeMin =
-      usageRange === "today"
-        ? usage!.per_project.reduce(
-            (s, x) => s + Math.max(0, new Date(x.last_ts).getTime() - new Date(x.first_ts).getTime()) / 60_000,
-            0,
-          )
-        : (p?.active_minutes ?? 0);
-    const stat = (label: string, value: string, cls = "") =>
-      `<div class="stat-card"><span class="stat-label">${label}</span><span class="stat-value mono ${cls}">${value}</span></div>`;
+    const activeMin = usageRange === "today" ? (usage?.active_minutes ?? 0) : (p?.active_minutes ?? 0);
+    const cost = costDisplay(srcs);
+    const stat = (label: string, value: string, cls = "", note = "") =>
+      `<div class="stat-card" title="${esc(note)}"><span class="stat-label">${label}</span><span class="stat-value mono ${cls}">${value}</span></div>`;
     $("u-stats").innerHTML = [
-      stat("预估费用", `$${estCost(srcs).toFixed(2)}`, "green"),
+      stat(cost.label, cost.value, "green", cost.note),
       stat("总 Token", fmt(total)),
       stat("缓存 Token", fmt(cacheRead)),
       stat("活跃时长", fmtMinutes(activeMin), "blue"),
@@ -858,15 +869,12 @@ function renderUsage() {
   }
 
   // ── 底部:快照时间 ──
-  const capturedAt = cl?.captured_at
-    ? new Date(cl.captured_at * 1000)
-    : cx?.fetchedAt
-      ? new Date(cx.fetchedAt)
-      : null;
+  const timestamps = [cl?.dataAsOf, cx?.dataAsOf].filter((v): v is number => typeof v === "number");
+  const capturedAt = timestamps.length ? Math.max(...timestamps) * 1000 : null;
   $("u-sync-dot").className = capturedAt ? "sync-dot ok" : "sync-dot";
   $("u-synced").textContent = capturedAt
-    ? `上次同步: ${Math.max(0, Math.round((Date.now() - capturedAt.getTime()) / 60_000))} 分钟前 · 费用为 API 牌价估算`
-    : "未检测到 vibe-usage 额度快照,只展示本地统计";
+    ? `额度观测于 ${Math.max(0, Math.round((Date.now() - capturedAt) / 60_000))} 分钟前 · 费用为参考估算`
+    : "用量来自本地 CLI 日志；额度尚无有效观测";
 }
 
 function renderDaily() {
@@ -893,7 +901,7 @@ function renderDaily() {
         const open = openRows.has(key);
 
         // 主行右侧:改动优先(它比 token 更能说明这个会话干了什么)
-        const diffTxt =
+        const diffTxt = a.git_available === false ? "Git 统计暂不可用" :
           a.dirty_files > 0
             ? `${a.dirty_files} 改动${a.insertions || a.deletions ? ` +${a.insertions}/-${a.deletions}` : ""}`
             : "";
@@ -1710,19 +1718,29 @@ async function planMilestones() {
 }
 
 /* ---------- 账号绑定 ---------- */
+let accountReady = false;
+let syncBusy = false;
+let authExpired = false;
+let accountGeneration = 0;
+let nextAutomaticSync = 0;
+let syncFailures = 0;
+
 function updateLoginStatus() {
-  const bound = !!store.get<string>("apiKey", "");
-  $("s-login-status").textContent = bound ? "已绑定 ✓" : "未绑定";
+  $("s-login-status").textContent = authExpired ? "授权已失效，请重新绑定" : accountReady ? "桌面凭据已安全保存" : "未绑定";
 }
 
 async function githubLogin() {
   const btn = $("s-login") as HTMLButtonElement;
   btn.disabled = true;
-  $("s-login-status").textContent = "浏览器中完成 GitHub 授权…";
+  $("s-login-status").textContent = "请在浏览器完成账号登录与桌面授权…";
   try {
-    const key = await invoke<string>("github_login", { endpointBase: null });
-    store.set("apiKey", key);
-    ($("s-apikey") as HTMLInputElement).value = key;
+    accountReady = await invoke<boolean>("github_login", { endpointBase: null });
+    accountGeneration++;
+    nextAutomaticSync = 0;
+    authExpired = false;
+    store.del("apiKey");
+    store.del("lastSyncAt");
+    ($("s-apikey") as HTMLInputElement).value = "";
     updateLoginStatus();
     $("s-login-status").textContent = "已绑定 ✓";
     void syncNow(true); // 登录成功立即同步一次
@@ -1734,8 +1752,7 @@ async function githubLogin() {
 }
 
 async function showPairCode() {
-  const apiKey = store.get<string>("apiKey", "");
-  if (!apiKey) {
+  if (!accountReady || authExpired) {
     $("s-code").textContent = "先登录";
     return;
   }
@@ -1743,7 +1760,7 @@ async function showPairCode() {
   btn.disabled = true;
   $("s-code").textContent = "……";
   try {
-    const code = await invoke<string>("request_pair_code", { apiKey, endpointBase: null });
+    const code = await invoke<string>("request_pair_code", { endpointBase: null });
     $("s-code").textContent = code;
     // 同一个码渲染成二维码,小程序端 wx.scanCode 解析 ht-bind: 前缀
     const dataUrl = await QRCode.toDataURL(`ht-bind:${code}`, {
@@ -1769,27 +1786,35 @@ function updateSyncStatus() {
 }
 
 async function syncNow(silent: boolean) {
-  const apiKey = store.get<string>("apiKey", "");
-  if (!apiKey) {
+  if (syncBusy) return;
+  if (!accountReady || authExpired) {
     if (!silent) $("s-sync-status").textContent = "请先保存 API Key";
     return;
   }
+  syncBusy = true;
+  const generation = accountGeneration;
   const btn = $("s-sync") as HTMLButtonElement;
   btn.disabled = true;
   if (!silent) $("s-sync-status").textContent = "聚合数据并上报中…";
   try {
-    await invoke<string>("sync_profile", {
-      apiKey,
-      days: 30,
-      endpoint: null,
+    const result = JSON.parse(await invoke<string>("sync_usage", {
       includeReceipt: store.get<boolean>("consentReceipt", false),
-    });
-    store.set("lastSyncAt", new Date().toISOString());
+    })) as { ok?: boolean; verified?: boolean; syncedAt?: string };
+    if (generation !== accountGeneration) return;
+    if (!result.ok || !result.verified) throw new Error("云端读回未通过");
+    syncFailures = 0;
+    nextAutomaticSync = Date.now() + 30 * 60_000;
+    store.set("lastSyncAt", result.syncedAt ?? new Date().toISOString());
     store.set("lastSyncDay", new Date().toISOString().slice(0, 10));
     updateSyncStatus();
   } catch (e) {
+    if (generation !== accountGeneration) return;
+    syncFailures++;
+    nextAutomaticSync = Date.now() + Math.min(30 * 60_000, 60_000 * 2 ** Math.min(syncFailures - 1, 5));
+    if (String(e).includes("401") || String(e).includes("DESKTOP_NOT_BOUND") || String(e).includes("DESKTOP_AUTH_EXPIRED") || String(e).includes("DEVICE_REVOKED")) { authExpired = true; updateLoginStatus(); }
     $("s-sync-status").textContent = `同步失败:${e}`;
   } finally {
+    syncBusy = false;
     btn.disabled = false;
   }
 }
@@ -2057,13 +2082,32 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // 账号绑定 + 云端同步
   const keyInput = $("s-apikey") as HTMLInputElement;
-  keyInput.value = store.get<string>("apiKey", "");
+  keyInput.value = "";
+  keyInput.placeholder = "手动输入桌面 API Key；清空后保存可解除本机绑定";
   updateSyncStatus();
-  updateLoginStatus();
-  $("s-savekey").addEventListener("click", () => {
-    store.set("apiKey", keyInput.value.trim());
-    updateLoginStatus(); // 绑定状态行显示结果,同步行保留上次同步时间
-    updateSyncStatus();
+  const initializeAccount = async () => {
+    try {
+      const legacy = store.get<string>("apiKey", "");
+      if (legacy) {
+        accountReady = await invoke<boolean>("save_desktop_credential", {apiKey:legacy});
+        if (accountReady) store.del("apiKey");
+      } else accountReady = await invoke<boolean>("desktop_credential_status");
+      updateLoginStatus();
+    } catch { $("s-login-status").textContent = "系统钥匙串不可用，请允许访问后重试"; }
+  };
+  void initializeAccount().then(() => {
+    if (accountReady && store.get<string>("lastSyncDay", "") !== new Date().toISOString().slice(0,10)) void syncNow(true);
+  });
+  $("s-savekey").addEventListener("click", async () => {
+    try {
+      accountReady = await invoke<boolean>("save_desktop_credential", {apiKey:keyInput.value.trim()});
+      accountGeneration++;
+      nextAutomaticSync = 0;
+      keyInput.value = "";
+      store.del("apiKey");store.del("lastSyncAt");store.del("lastSyncDay");
+      authExpired = false;
+      updateLoginStatus();updateSyncStatus();
+    } catch { $("s-login-status").textContent = "凭据保存失败，请检查格式或钥匙串授权"; }
   });
   ($("s-syncurl") as HTMLInputElement).value = store.get<string>("syncUrl", "");
   ($("s-synctoken") as HTMLInputElement).value = store.get<string>("syncToken", "");
@@ -2077,11 +2121,6 @@ window.addEventListener("DOMContentLoaded", () => {
   $("s-paircode").addEventListener("click", () => void showPairCode());
   $("s-sync").addEventListener("click", () => void syncNow(false));
 
-  // 每天首次启动自动同步一次(已绑定的情况下)
-  const today = new Date().toISOString().slice(0, 10);
-  if (store.get<string>("apiKey", "") && store.get<string>("lastSyncDay", "") !== today) {
-    setTimeout(() => void syncNow(true), 5_000);
-  }
 
   $("summary-btn").addEventListener("click", () => void generateSummary());
   // 贴赛事页链接自动抓正文,免手工复制
@@ -2255,6 +2294,9 @@ window.addEventListener("DOMContentLoaded", () => {
   void refreshAgents();
   void refreshLimits();
   void tkLoad();
+  setInterval(() => {
+    if (accountReady && !authExpired && !syncBusy && Date.now() >= nextAutomaticSync) void syncNow(true);
+  }, 60_000);
   setInterval(() => void refreshUsage(), 60_000); // 用量/仓库:每分钟
   setInterval(() => void refreshLimits(), 300_000); // 额度快照:每 5 分钟
   setInterval(() => void refreshAgents(), 15_000); // agent 进程:每 15 秒

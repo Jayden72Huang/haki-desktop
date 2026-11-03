@@ -1,3 +1,9 @@
+mod credentials;
+mod desktop_callback;
+mod quota;
+mod usage_buckets;
+mod usage_logs;
+mod usage_sync;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -36,16 +42,20 @@ pub struct UsageToday {
     pub sources: Vec<SourceUsage>,
     /// 今日分时用量:本地时区 24 小时分桶,含全部来源
     pub hourly: Vec<u64>,
+    pub active_minutes: usize,
 }
 
 const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 fn claude_projects_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+        .map(|h| h.join("projects"))
 }
 
 fn codex_sessions_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
+    codex_home().map(|h| h.join("sessions"))
 }
 
 /// 递归找出 mtime 在 cutoff 之后的 .jsonl。
@@ -60,9 +70,16 @@ fn jsonl_files_since(root: &PathBuf, cutoff: SystemTime) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "jsonl")
+            } else if kind.is_file()
+                && path.extension().is_some_and(|e| e == "jsonl")
                 && entry
                     .metadata()
                     .and_then(|m| m.modified())
@@ -89,6 +106,70 @@ pub struct SourceUsage {
     pub models: Vec<ModelStat>,
     /// 该来源的今日分时用量(本地时区 24 桶)
     pub hourly: Vec<u64>,
+    #[serde(skip)]
+    activity_minutes: HashSet<String>,
+    #[serde(skip)]
+    project_activity: HashMap<String, ProjectToday>,
+    #[serde(skip)]
+    project_minutes: HashMap<String, HashSet<String>>,
+    #[serde(
+        rename = "model_usage",
+        serialize_with = "usage_buckets::serialize_models"
+    )]
+    buckets: usage_buckets::Accumulator,
+}
+
+impl SourceUsage {
+    fn observe(&mut self, ts: &str, cwd: Option<&str>, tokens: u64) {
+        let Ok(date) = chrono::DateTime::parse_from_rfc3339(ts) else {
+            return;
+        };
+        self.activity_minutes.insert(
+            date.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M")
+                .to_string(),
+        );
+        if let Some(cwd) = cwd.filter(|x| !x.is_empty()) {
+            let p = self
+                .project_activity
+                .entry(cwd.into())
+                .or_insert_with(|| ProjectToday {
+                    cwd: cwd.into(),
+                    first_ts: ts.into(),
+                    last_ts: ts.into(),
+                    ..Default::default()
+                });
+            self.project_minutes.entry(cwd.into()).or_default().insert(
+                date.with_timezone(&chrono::Utc)
+                    .format("%Y-%m-%dT%H:%M")
+                    .to_string(),
+            );
+            p.tokens += tokens;
+            if ts < p.first_ts.as_str() {
+                p.first_ts = ts.into();
+            }
+            if ts > p.last_ts.as_str() {
+                p.last_ts = ts.into();
+            }
+        }
+    }
+}
+fn all_source_models(sources: &[SourceUsage]) -> Vec<ModelStat> {
+    let mut models = HashMap::new();
+    for source in sources {
+        for model in &source.models {
+            *models.entry(model.model.clone()).or_insert(0) += model.tokens;
+        }
+    }
+    models_sorted(models)
+}
+
+fn source_totals(sources: &[SourceUsage]) -> (u64, u64, usize) {
+    (
+        sources.iter().map(|s| s.total).sum(),
+        sources.iter().map(|s| s.output).sum(),
+        sources.iter().map(|s| s.sessions).sum(),
+    )
 }
 
 /// ISO UTC 时间串 → 本地小时(0-23),供分时柱状图归桶
@@ -112,36 +193,54 @@ fn models_sorted(m: HashMap<String, u64>) -> Vec<ModelStat> {
 /// 计算方法与 vibeusage/ccusage 同口径:累加每条 token_count 事件的
 /// last_token_usage(单次增量),绝不能累加 total_token_usage(会话累计值)。
 /// 模型名来自最近一条 turn_context 事件(token_count 本身不带模型)。
-fn collect_codex_usage(since_ts: &str, mtime_cutoff: SystemTime) -> SourceUsage {
+fn collect_codex_usage(since_ts: &str, mtime_cutoff: SystemTime) -> Result<SourceUsage, String> {
+    let Some(root) = codex_sessions_dir() else {
+        return Ok(SourceUsage {
+            source: "codex".into(),
+            ..Default::default()
+        });
+    };
+    collect_codex_usage_at(&root, since_ts, mtime_cutoff)
+}
+fn collect_codex_usage_at(
+    root: &PathBuf,
+    since_ts: &str,
+    mtime_cutoff: SystemTime,
+) -> Result<SourceUsage, String> {
     let mut su = SourceUsage {
         source: "codex".into(),
         hourly: vec![0; 24],
         ..Default::default()
     };
-    let Some(root) = codex_sessions_dir() else {
-        return su;
-    };
     if !root.is_dir() {
-        return su;
+        return Ok(su);
     }
     let mut models: HashMap<String, u64> = HashMap::new();
-    let mut sessions: HashSet<PathBuf> = HashSet::new();
+    let mut sessions: HashSet<String> = HashSet::new();
     // resume 会把历史事件重放进新 rollout 文件,按 时间戳+累计值 全局去重
     let mut seen: HashSet<String> = HashSet::new();
     for path in jsonl_files_since(&root, mtime_cutoff) {
-        let Ok(file) = fs::File::open(&path) else {
-            continue;
-        };
         let mut current_model = String::from("gpt-unknown");
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let is_turn = line.contains("\"turn_context\"");
-            if !is_turn && !line.contains("\"token_count\"") {
+        let mut current_session = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let mut current_cwd: Option<String> = None;
+        for v in usage_logs::read_events(&path)? {
+            let is_turn = v["type"] == "turn_context";
+            let is_meta = v["type"] == "session_meta";
+            if is_meta && v["type"] == "session_meta" {
+                if let Some(id) = v["payload"]["id"].as_str() {
+                    current_session = id.into();
+                }
+                current_cwd = v["payload"]["cwd"].as_str().map(String::from);
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
             if is_turn && v["type"] == "turn_context" {
+                if let Some(cwd) = v["payload"]["cwd"].as_str() {
+                    current_cwd = Some(cwd.into());
+                }
                 if let Some(m) = v["payload"]["model"].as_str() {
                     current_model = m.to_string();
                 }
@@ -151,17 +250,26 @@ fn collect_codex_usage(since_ts: &str, mtime_cutoff: SystemTime) -> SourceUsage 
                 continue;
             }
             let ts = v["timestamp"].as_str().unwrap_or("");
-            if ts < since_ts {
+            if chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .zip(chrono::DateTime::parse_from_rfc3339(since_ts).ok())
+                .is_none_or(|(ts, since)| ts < since)
+            {
                 continue;
             }
             let info = &v["payload"]["info"];
             let Some(last) = info["last_token_usage"].as_object() else {
                 continue;
             };
-            let cum = info["total_token_usage"]["total_tokens"]
-                .as_u64()
-                .unwrap_or(0);
-            if !seen.insert(format!("{ts}:{cum}")) {
+            // Quota-only updates can repeat the prior turn's last usage under a new timestamp.
+            // Deduplicate by stable session + cumulative counters, not wall-clock event time.
+            let cumulative = &info["total_token_usage"];
+            let identity = if cumulative.is_object() {
+                format!("{current_session}:{cumulative}")
+            } else {
+                format!("{current_session}:{ts}")
+            };
+            if !seen.insert(identity) {
                 continue;
             }
             let g = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -179,13 +287,31 @@ fn collect_codex_usage(since_ts: &str, mtime_cutoff: SystemTime) -> SourceUsage 
             if let Some(h) = local_hour_of_iso(ts) {
                 su.hourly[h] += input + output + cached + cache_write;
             }
-            sessions.insert(path.clone());
+            su.buckets.record(
+                "codex",
+                &current_model,
+                current_cwd.as_deref(),
+                ts,
+                usage_buckets::Amounts {
+                    input,
+                    output,
+                    cache_read: cached,
+                    cache_write,
+                    reasoning: g("reasoning_output_tokens"),
+                },
+            );
+            su.observe(
+                ts,
+                current_cwd.as_deref(),
+                input + output + cached + cache_write,
+            );
+            sessions.insert(current_session.clone());
         }
     }
     su.total = su.input + su.output + su.cache_write + su.cache_read;
     su.sessions = sessions.len();
     su.models = models_sorted(models);
-    su
+    Ok(su)
 }
 
 fn grok_sessions_dir() -> Option<PathBuf> {
@@ -196,17 +322,17 @@ fn grok_sessions_dir() -> Option<PathBuf> {
 /// 每次用户 prompt 结束会落一条 turn_completed 事件,usage 是该轮整个
 /// agentic 循环的增量(实测多轮数值不递增,非累计值),modelUsage 按模型细分。
 /// 事件时间戳是 unix 秒;按 prompt_id 全局去重防 resume 重放。
-fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage {
+fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> Result<SourceUsage, String> {
     let mut su = SourceUsage {
         source: "grok".into(),
         hourly: vec![0; 24],
         ..Default::default()
     };
     let Some(root) = grok_sessions_dir() else {
-        return su;
+        return Ok(su);
     };
     if !root.is_dir() {
-        return su;
+        return Ok(su);
     }
     let mut models: HashMap<String, u64> = HashMap::new();
     let mut sessions: HashSet<PathBuf> = HashSet::new();
@@ -216,16 +342,7 @@ fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage
         if path.file_name().is_none_or(|n| n != "updates.jsonl") {
             continue;
         }
-        let Ok(file) = fs::File::open(&path) else {
-            continue;
-        };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            if !line.contains("turn_completed") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
+        for v in usage_logs::read_events(&path)? {
             let update = &v["params"]["update"];
             if update["sessionUpdate"] != "turn_completed" {
                 continue;
@@ -259,6 +376,21 @@ fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage
                 su.output += output;
                 su.cache_read += cached;
                 su.cache_write += cache_write;
+                if let Some(date) = chrono::DateTime::from_timestamp(ts, 0) {
+                    su.buckets.record(
+                        "grok",
+                        &model,
+                        None,
+                        &date.to_rfc3339(),
+                        usage_buckets::Amounts {
+                            input,
+                            output,
+                            cache_read: cached,
+                            cache_write,
+                            reasoning: 0,
+                        },
+                    );
+                }
                 *models.entry(model).or_insert(0) += input + output + cached + cache_write;
                 // grok 事件时间戳是 unix 秒,换算本地小时归桶
                 use chrono::{TimeZone, Timelike};
@@ -270,6 +402,9 @@ fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage
                     su.hourly[h] += input + output + cached + cache_write;
                 }
             }
+            if let Some(date) = chrono::DateTime::from_timestamp(ts, 0) {
+                su.observe(&date.to_rfc3339(), None, 0);
+            }
             if let Some(dir) = path.parent() {
                 sessions.insert(dir.to_path_buf());
             }
@@ -278,7 +413,7 @@ fn collect_grok_usage(since_epoch: i64, mtime_cutoff: SystemTime) -> SourceUsage
     su.total = su.input + su.output + su.cache_write + su.cache_read;
     su.sessions = sessions.len();
     su.models = models_sorted(models);
-    su
+    Ok(su)
 }
 
 /// 本地时区今天零点的 unix 秒(grok 日志用 epoch 时间戳)
@@ -298,24 +433,18 @@ fn local_today_start_epoch() -> i64 {
 /// 本地时区今天零点对应的 UTC 时间串(日志时间戳是 UTC ISO,前缀可比较)
 /// 与 dev_today 里 git --since=midnight 的本地口径保持一致
 fn local_today_start_utc() -> String {
-    use chrono::TimeZone;
-    let midnight = chrono::Local::now()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .expect("00:00:00 恒为合法时间");
-    chrono::Local
-        .from_local_datetime(&midnight)
-        .single()
-        .map(|dt| {
-            dt.with_timezone(&chrono::Utc)
-                .format("%Y-%m-%dT%H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string())
+    chrono::DateTime::from_timestamp(local_today_start_epoch(), 0)
+        .expect("valid local midnight")
+        .to_rfc3339()
 }
 
 #[tauri::command]
-fn usage_today() -> Result<UsageToday, String> {
+async fn usage_today() -> Result<UsageToday, String> {
+    tauri::async_runtime::spawn_blocking(collect_usage_today)
+        .await
+        .map_err(|_| "USAGE_READ_FAILED".to_string())?
+}
+fn collect_usage_today() -> Result<UsageToday, String> {
     let root = claude_projects_dir().ok_or("找不到用户目录")?;
     let today_start = local_today_start_utc();
     // 只扫最近 48h 内有写入的文件,今日数据必然在其中
@@ -323,92 +452,93 @@ fn usage_today() -> Result<UsageToday, String> {
 
     let mut result = UsageToday::default();
     let mut sessions: HashSet<String> = HashSet::new();
-    let mut seen: HashSet<String> = HashSet::new();
     let mut projects: HashSet<String> = HashSet::new();
     let mut per_project: HashMap<String, ProjectToday> = HashMap::new();
     let mut models: HashMap<String, u64> = HashMap::new();
     let mut hourly = vec![0u64; 24];
+    let mut activity_minutes = HashSet::new();
 
-    for path in jsonl_files_since(&root, cutoff) {
-        result.scanned_files += 1;
-        let Ok(file) = fs::File::open(&path) else {
+    let files = jsonl_files_since(&root, cutoff);
+    result.scanned_files = files.len();
+    let mut claude_buckets = usage_buckets::Accumulator::default();
+    for v in usage_logs::scan(&files, local_today_start_epoch())? {
+        if v["type"] != "assistant" {
+            continue;
+        }
+        let ts = v["timestamp"].as_str().unwrap_or("");
+        let Ok(date) = chrono::DateTime::parse_from_rfc3339(ts) else {
             continue;
         };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            if !line.contains("\"usage\"") {
-                continue;
+        if date.timestamp() < local_today_start_epoch() {
+            continue;
+        }
+        activity_minutes.insert(
+            date.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M")
+                .to_string(),
+        );
+        let Some(usage) = v["message"]["usage"].as_object() else {
+            continue;
+        };
+        let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let line_tokens = g("input_tokens")
+            + g("output_tokens")
+            + g("cache_creation_input_tokens")
+            + g("cache_read_input_tokens");
+        claude_buckets.record(
+            "claude",
+            v["message"]["model"].as_str().unwrap_or("claude-unknown"),
+            v["cwd"].as_str(),
+            ts,
+            usage_buckets::Amounts {
+                input: g("input_tokens"),
+                output: g("output_tokens"),
+                cache_read: g("cache_read_input_tokens"),
+                cache_write: g("cache_creation_input_tokens"),
+                reasoning: 0,
+            },
+        );
+        result.input += g("input_tokens");
+        result.output += g("output_tokens");
+        result.cache_write += g("cache_creation_input_tokens");
+        result.cache_read += g("cache_read_input_tokens");
+        if let Some(h) = local_hour_of_iso(ts) {
+            hourly[h] += line_tokens;
+        }
+        if let Some(model) = v["message"]["model"].as_str() {
+            if model != "<synthetic>" {
+                *models.entry(model.to_string()).or_insert(0) += line_tokens;
             }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            if v["type"] != "assistant" {
-                continue;
-            }
-            let ts = v["timestamp"].as_str().unwrap_or("");
-            if ts < today_start.as_str() {
-                continue;
-            }
-            let Some(usage) = v["message"]["usage"].as_object() else {
-                continue;
-            };
-            // 流式写入会让同一条消息重复出现,按 message.id + requestId 去重
-            let key = format!(
-                "{}:{}",
-                v["message"]["id"].as_str().unwrap_or(""),
-                v["requestId"]
-                    .as_str()
-                    .unwrap_or_else(|| v["uuid"].as_str().unwrap_or(""))
-            );
-            if !seen.insert(key) {
-                continue;
-            }
-            let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-            let line_tokens = g("input_tokens")
-                + g("output_tokens")
-                + g("cache_creation_input_tokens")
-                + g("cache_read_input_tokens");
-            result.input += g("input_tokens");
-            result.output += g("output_tokens");
-            result.cache_write += g("cache_creation_input_tokens");
-            result.cache_read += g("cache_read_input_tokens");
-            if let Some(h) = local_hour_of_iso(ts) {
-                hourly[h] += line_tokens;
-            }
-            if let Some(model) = v["message"]["model"].as_str() {
-                if model != "<synthetic>" {
-                    *models.entry(model.to_string()).or_insert(0) += line_tokens;
+        }
+        if let Some(sid) = v["sessionId"].as_str() {
+            sessions.insert(sid.to_string());
+        }
+        if let Some(cwd) = v["cwd"].as_str() {
+            if !cwd.is_empty() {
+                projects.insert(cwd.to_string());
+                let p = per_project
+                    .entry(cwd.to_string())
+                    .or_insert_with(|| ProjectToday {
+                        cwd: cwd.to_string(),
+                        first_ts: ts.to_string(),
+                        last_ts: ts.to_string(),
+                        ..Default::default()
+                    });
+                p.tokens += line_tokens;
+                if ts < p.first_ts.as_str() {
+                    p.first_ts = ts.to_string();
                 }
-            }
-            if let Some(sid) = v["sessionId"].as_str() {
-                sessions.insert(sid.to_string());
-            }
-            if let Some(cwd) = v["cwd"].as_str() {
-                if !cwd.is_empty() {
-                    projects.insert(cwd.to_string());
-                    let p = per_project
-                        .entry(cwd.to_string())
-                        .or_insert_with(|| ProjectToday {
-                            cwd: cwd.to_string(),
-                            first_ts: ts.to_string(),
-                            last_ts: ts.to_string(),
-                            ..Default::default()
-                        });
-                    p.tokens += line_tokens;
-                    if ts < p.first_ts.as_str() {
-                        p.first_ts = ts.to_string();
-                    }
-                    if ts > p.last_ts.as_str() {
-                        p.last_ts = ts.to_string();
-                    }
-                    if let Some(content) = v["message"]["content"].as_array() {
-                        for item in content {
-                            if item["type"] == "tool_use"
-                                && item["name"]
-                                    .as_str()
-                                    .is_some_and(|n| EDIT_TOOLS.contains(&n))
-                            {
-                                p.edits += 1;
-                            }
+                if ts > p.last_ts.as_str() {
+                    p.last_ts = ts.to_string();
+                }
+                if let Some(content) = v["message"]["content"].as_array() {
+                    for item in content {
+                        if item["type"] == "tool_use"
+                            && item["name"]
+                                .as_str()
+                                .is_some_and(|n| EDIT_TOOLS.contains(&n))
+                        {
+                            p.edits += 1;
                         }
                     }
                 }
@@ -433,9 +563,12 @@ fn usage_today() -> Result<UsageToday, String> {
         sessions: result.sessions,
         models: result.models.clone(),
         hourly,
+        activity_minutes,
+        buckets: claude_buckets,
+        ..Default::default()
     };
-    let codex_source = collect_codex_usage(&today_start, cutoff);
-    let grok_source = collect_grok_usage(local_today_start_epoch(), cutoff);
+    let codex_source = collect_codex_usage(&today_start, cutoff)?;
+    let grok_source = collect_grok_usage(local_today_start_epoch(), cutoff)?;
     // 分时合计:三个来源逐桶相加
     let mut total_hourly = vec![0u64; 24];
     for src in [&claude_source, &codex_source, &grok_source] {
@@ -445,6 +578,40 @@ fn usage_today() -> Result<UsageToday, String> {
     }
     result.hourly = total_hourly;
     result.sources = vec![claude_source, codex_source, grok_source];
+    result.active_minutes = result
+        .sources
+        .iter()
+        .flat_map(|x| x.activity_minutes.iter())
+        .collect::<HashSet<_>>()
+        .len();
+    let mut per_project: HashMap<String, ProjectToday> = result
+        .per_project
+        .into_iter()
+        .map(|p| (p.cwd.clone(), p))
+        .collect();
+    for source in &result.sources {
+        for (cwd, p) in &source.project_activity {
+            let entry = per_project
+                .entry(cwd.clone())
+                .or_insert_with(|| ProjectToday {
+                    cwd: cwd.clone(),
+                    first_ts: p.first_ts.clone(),
+                    last_ts: p.last_ts.clone(),
+                    ..Default::default()
+                });
+            entry.tokens += p.tokens;
+            if p.first_ts < entry.first_ts {
+                entry.first_ts = p.first_ts.clone();
+            }
+            if p.last_ts > entry.last_ts {
+                entry.last_ts = p.last_ts.clone();
+            }
+        }
+    }
+    result.per_project = per_project.into_values().collect();
+    result.per_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    result.projects = result.per_project.iter().map(|p| p.cwd.clone()).collect();
+    result.models = all_source_models(&result.sources);
     Ok(result)
 }
 
@@ -625,7 +792,12 @@ fn codex_status(cwd: &str) -> Result<AgentStatus, String> {
 }
 
 #[tauri::command]
-fn agent_status(cwd: String, agent: Option<String>) -> Result<AgentStatus, String> {
+async fn agent_status(cwd: String, agent: Option<String>) -> Result<AgentStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || collect_agent_status(cwd, agent))
+        .await
+        .map_err(|_| "LOCAL_SCAN_FAILED".to_string())?
+}
+fn collect_agent_status(cwd: String, agent: Option<String>) -> Result<AgentStatus, String> {
     use std::io::{Read, Seek, SeekFrom};
 
     if agent.as_deref() == Some("codex") {
@@ -752,6 +924,7 @@ pub struct AgentProc {
     /// 当前分支,detached HEAD 或非 git 目录为 None
     pub branch: Option<String>,
     /// 未提交的改动文件数(含未跟踪)
+    pub git_available: bool,
     pub dirty_files: u32,
     pub insertions: u32,
     pub deletions: u32,
@@ -759,9 +932,9 @@ pub struct AgentProc {
 
 /// 一个目录的 git 概况。`status --porcelain -b` 一次同时给出分支和改动文件,
 /// 比分开调 rev-parse + status 少一次进程启动。
-fn git_snapshot(path: &str) -> (Option<String>, u32, u32, u32) {
+fn git_snapshot(path: &str) -> (Option<String>, u32, u32, u32, bool) {
     let Some(status) = git(path, &["status", "--porcelain=v1", "-b"]) else {
-        return (None, 0, 0, 0);
+        return (None, 0, 0, 0, false);
     };
     let mut branch = None;
     let mut dirty = 0u32;
@@ -780,21 +953,32 @@ fn git_snapshot(path: &str) -> (Option<String>, u32, u32, u32) {
         }
     }
     // 行级增删只看已跟踪文件,未跟踪文件没有 diff 可言
-    let (ins, del) = git(path, &["diff", "--numstat", "HEAD"])
-        .map(|out| {
-            let mut i = 0u32;
-            let mut d = 0u32;
-            for line in out.lines() {
-                let mut it = line.split('\t');
-                if let (Some(a), Some(b)) = (it.next(), it.next()) {
-                    i += a.parse::<u32>().unwrap_or(0);
-                    d += b.parse::<u32>().unwrap_or(0);
-                }
+    let diff = git(
+        path,
+        &[
+            "diff",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "HEAD",
+        ],
+    )
+    .map(|out| {
+        let mut i = 0u32;
+        let mut d = 0u32;
+        for line in out.lines() {
+            let mut it = line.split('\t');
+            if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                i += a.parse::<u32>().unwrap_or(0);
+                d += b.parse::<u32>().unwrap_or(0);
             }
-            (i, d)
-        })
-        .unwrap_or((0, 0));
-    (branch, dirty, ins, del)
+        }
+        (i, d)
+    });
+    let available = diff.is_some();
+    let (ins, del) = diff.unwrap_or((0, 0));
+    (branch, dirty, ins, del, available)
 }
 
 const AGENT_BINS: &[&str] = &[
@@ -834,7 +1018,12 @@ fn cwd_of_pid(pid: u32) -> Option<String> {
 }
 
 #[tauri::command]
-fn running_agents() -> Result<Vec<AgentProc>, String> {
+async fn running_agents() -> Result<Vec<AgentProc>, String> {
+    tauri::async_runtime::spawn_blocking(collect_running_agents)
+        .await
+        .map_err(|_| "LOCAL_SCAN_FAILED".to_string())?
+}
+fn collect_running_agents() -> Result<Vec<AgentProc>, String> {
     let out = Command::new("ps")
         .args(["-axo", "pid=,args="])
         .output()
@@ -865,8 +1054,10 @@ fn running_agents() -> Result<Vec<AgentProc>, String> {
         if !dedupe.insert(key) {
             continue; // 同一 agent 在同一目录的多个进程只记一条
         }
-        let (branch, dirty_files, insertions, deletions) =
-            cwd.as_deref().map(git_snapshot).unwrap_or((None, 0, 0, 0));
+        let (branch, dirty_files, insertions, deletions, git_available) = cwd
+            .as_deref()
+            .map(git_snapshot)
+            .unwrap_or((None, 0, 0, 0, false));
         found.push(AgentProc {
             agent: agent.to_string(),
             pid,
@@ -874,6 +1065,7 @@ fn running_agents() -> Result<Vec<AgentProc>, String> {
             project,
             branch,
             dirty_files,
+            git_available,
             insertions,
             deletions,
         });
@@ -993,7 +1185,10 @@ process.frontmost = true;
     }
     if stderr.contains("not authorized") || stderr.contains("不被允许") || stderr.contains("-1743")
     {
-        return Err("请在 系统设置 → 隐私与安全性 → 自动化 中允许 Haki / HackerTrip 控制 System Events".into());
+        return Err(
+            "请在 系统设置 → 隐私与安全性 → 自动化 中允许 Haki / HackerTrip 控制 System Events"
+                .into(),
+        );
     }
     Err(if stderr.is_empty() {
         "Vibeyard 终端跳转失败".into()
@@ -1034,20 +1229,81 @@ pub struct RepoToday {
 }
 
 fn git(path: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut command = Command::new("git");
+    command
+        .arg("--no-optional-locks")
+        .args(["-c", "core.fsmonitor=false", "-C", path])
         .args(args)
-        .output()
-        .ok()?;
-    if !out.status.success() {
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(2 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .ok()
+            .map(|_| bytes);
+        let _ = send.send(result);
+    });
+    fn stop_query(child: &mut std::process::Child) {
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn kill(pid: i32, signal: i32) -> i32;
+            }
+            // Every query starts in its own group; never signal another app's group.
+            unsafe {
+                kill(-(child.id() as i32), 9);
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            _ => {
+                stop_query(&mut child);
+                break false;
+            }
+        }
+    };
+    let bytes =
+        match receive.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok(Some(bytes)) => bytes,
+            _ => {
+                stop_query(&mut child);
+                return None;
+            }
+        };
+    if !success || bytes.len() > 2 * 1024 * 1024 {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Some(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
 #[tauri::command]
-fn dev_today(paths: Vec<String>) -> Vec<RepoToday> {
+async fn dev_today(paths: Vec<String>) -> Result<Vec<RepoToday>, String> {
+    tauri::async_runtime::spawn_blocking(move || collect_dev_today(paths))
+        .await
+        .map_err(|_| "LOCAL_SCAN_FAILED".to_string())
+}
+fn collect_dev_today(paths: Vec<String>) -> Vec<RepoToday> {
     let mut repos = Vec::new();
     let mut seen_roots: HashSet<String> = HashSet::new();
     for p in paths {
@@ -1105,7 +1361,12 @@ pub struct RepoCommit {
 }
 
 #[tauri::command]
-fn repo_commits(path: String, limit: usize) -> Result<Vec<RepoCommit>, String> {
+async fn repo_commits(path: String, limit: usize) -> Result<Vec<RepoCommit>, String> {
+    tauri::async_runtime::spawn_blocking(move || collect_repo_commits(path, limit))
+        .await
+        .map_err(|_| "LOCAL_SCAN_FAILED".to_string())?
+}
+fn collect_repo_commits(path: String, limit: usize) -> Result<Vec<RepoCommit>, String> {
     let root = git(&path, &["rev-parse", "--show-toplevel"])
         .ok_or_else(|| format!("不是 git 仓库: {path}"))?;
     // 未推送 SHA 集合;命令失败(通常是没配 upstream)时为 None,全部按未推送处理
@@ -1114,7 +1375,13 @@ fn repo_commits(path: String, limit: usize) -> Result<Vec<RepoCommit>, String> {
     let n = limit.clamp(1, 100).to_string();
     let log = git(
         &root,
-        &["log", "--since=midnight", "-n", &n, "--pretty=%H%x09%cI%x09%s"],
+        &[
+            "log",
+            "--since=midnight",
+            "-n",
+            &n,
+            "--pretty=%H%x09%cI%x09%s",
+        ],
     )
     .unwrap_or_default();
     let mut commits = Vec::new();
@@ -1353,15 +1620,87 @@ pub struct ProviderProfile {
 }
 
 const PROVIDER_PROFILES: &[ProviderProfile] = &[
-    ProviderProfile { id: "glm-claude", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/anthropic", target_cli: "claude", key_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys", model: "glm-4.6", note: "GLM Coding Plan,黑客松最常见赞助" },
-    ProviderProfile { id: "kimi-claude", name: "Kimi (Moonshot)", base_url: "https://api.moonshot.cn/anthropic", target_cli: "claude", key_url: "https://platform.moonshot.cn/console/api-keys", model: "kimi-k2-turbo-preview", note: "Anthropic 兼容端点" },
-    ProviderProfile { id: "deepseek-claude", name: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", target_cli: "claude", key_url: "https://platform.deepseek.com/api_keys", model: "deepseek-chat", note: "Anthropic 兼容端点" },
-    ProviderProfile { id: "qwen-claude", name: "通义千问(百炼)", base_url: "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy", target_cli: "claude", key_url: "https://bailian.console.aliyun.com/?tab=model#/api-key", model: "", note: "阿里云百炼 Claude Code 代理,模型端点侧固定" },
-    ProviderProfile { id: "minimax-claude", name: "MiniMax", base_url: "https://api.minimaxi.com/anthropic", target_cli: "claude", key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key", model: "MiniMax-M2", note: "Anthropic 兼容端点" },
-    ProviderProfile { id: "glm-codex", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/coding/paas/v4", target_cli: "codex", key_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys", model: "glm-4.6", note: "OpenAI 兼容端点(coding 专用)" },
-    ProviderProfile { id: "kimi-codex", name: "Kimi (Moonshot)", base_url: "https://api.moonshot.cn/v1", target_cli: "codex", key_url: "https://platform.moonshot.cn/console/api-keys", model: "kimi-k2-turbo-preview", note: "OpenAI 兼容端点" },
-    ProviderProfile { id: "deepseek-codex", name: "DeepSeek", base_url: "https://api.deepseek.com/v1", target_cli: "codex", key_url: "https://platform.deepseek.com/api_keys", model: "deepseek-chat", note: "OpenAI 兼容端点" },
-    ProviderProfile { id: "qwen-codex", name: "通义千问(百炼)", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", target_cli: "codex", key_url: "https://bailian.console.aliyun.com/?tab=model#/api-key", model: "qwen3-coder-plus", note: "OpenAI 兼容端点" },
+    ProviderProfile {
+        id: "glm-claude",
+        name: "智谱 GLM",
+        base_url: "https://open.bigmodel.cn/api/anthropic",
+        target_cli: "claude",
+        key_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+        model: "glm-4.6",
+        note: "GLM Coding Plan,黑客松最常见赞助",
+    },
+    ProviderProfile {
+        id: "kimi-claude",
+        name: "Kimi (Moonshot)",
+        base_url: "https://api.moonshot.cn/anthropic",
+        target_cli: "claude",
+        key_url: "https://platform.moonshot.cn/console/api-keys",
+        model: "kimi-k2-turbo-preview",
+        note: "Anthropic 兼容端点",
+    },
+    ProviderProfile {
+        id: "deepseek-claude",
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com/anthropic",
+        target_cli: "claude",
+        key_url: "https://platform.deepseek.com/api_keys",
+        model: "deepseek-chat",
+        note: "Anthropic 兼容端点",
+    },
+    ProviderProfile {
+        id: "qwen-claude",
+        name: "通义千问(百炼)",
+        base_url: "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy",
+        target_cli: "claude",
+        key_url: "https://bailian.console.aliyun.com/?tab=model#/api-key",
+        model: "",
+        note: "阿里云百炼 Claude Code 代理,模型端点侧固定",
+    },
+    ProviderProfile {
+        id: "minimax-claude",
+        name: "MiniMax",
+        base_url: "https://api.minimaxi.com/anthropic",
+        target_cli: "claude",
+        key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+        model: "MiniMax-M2",
+        note: "Anthropic 兼容端点",
+    },
+    ProviderProfile {
+        id: "glm-codex",
+        name: "智谱 GLM",
+        base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
+        target_cli: "codex",
+        key_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+        model: "glm-4.6",
+        note: "OpenAI 兼容端点(coding 专用)",
+    },
+    ProviderProfile {
+        id: "kimi-codex",
+        name: "Kimi (Moonshot)",
+        base_url: "https://api.moonshot.cn/v1",
+        target_cli: "codex",
+        key_url: "https://platform.moonshot.cn/console/api-keys",
+        model: "kimi-k2-turbo-preview",
+        note: "OpenAI 兼容端点",
+    },
+    ProviderProfile {
+        id: "deepseek-codex",
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com/v1",
+        target_cli: "codex",
+        key_url: "https://platform.deepseek.com/api_keys",
+        model: "deepseek-chat",
+        note: "OpenAI 兼容端点",
+    },
+    ProviderProfile {
+        id: "qwen-codex",
+        name: "通义千问(百炼)",
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        target_cli: "codex",
+        key_url: "https://bailian.console.aliyun.com/?tab=model#/api-key",
+        model: "qwen3-coder-plus",
+        note: "OpenAI 兼容端点",
+    },
 ];
 
 /// 运行时供应商条目:内置清单与赞助商热配置合并后的结果
@@ -1525,7 +1864,10 @@ fn merged_profiles(refresh_remote: bool) -> Vec<ProviderEntry> {
 
 /// 参赛编号领取分配的 API Key。云端接口未上线时返回可操作的错误文案。
 #[tauri::command]
-async fn claim_sponsor_token(code: String, provider_id: String) -> Result<serde_json::Value, String> {
+async fn claim_sponsor_token(
+    code: String,
+    provider_id: String,
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(6)))
@@ -1540,7 +1882,9 @@ async fn claim_sponsor_token(code: String, provider_id: String) -> Result<serde_
                 serde_json::from_str::<serde_json::Value>(&text)
                     .map_err(|_| "领取服务响应异常,请联系主办方或手动粘贴 Key".to_string())
             }
-            Err(ureq::Error::StatusCode(404)) => Err("该赛事的自动发放未开通,请向主办方领取 Key 后手动粘贴".into()),
+            Err(ureq::Error::StatusCode(404)) => {
+                Err("该赛事的自动发放未开通,请向主办方领取 Key 后手动粘贴".into())
+            }
             Err(ureq::Error::StatusCode(c)) => Err(format!("领取失败({c}),检查参赛编号是否正确")),
             Err(_) => Err("网络异常,稍后重试或手动粘贴 Key".into()),
         }
@@ -1558,20 +1902,22 @@ async fn provider_profiles() -> Result<Vec<ProviderEntry>, String> {
 }
 
 fn claude_settings_path() -> Result<PathBuf, String> {
-    dirs::home_dir()
-        .map(|h| h.join(".claude").join("settings.json"))
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+        .map(|h| h.join("settings.json"))
         .ok_or_else(|| "找不到用户主目录".to_string())
 }
 
 fn codex_config_path() -> Result<PathBuf, String> {
-    dirs::home_dir()
-        .map(|h| h.join(".codex").join("config.toml"))
+    codex_home()
+        .map(|h| h.join("config.toml"))
         .ok_or_else(|| "找不到用户主目录".to_string())
 }
 
 fn codex_auth_path() -> Result<PathBuf, String> {
-    dirs::home_dir()
-        .map(|h| h.join(".codex").join("auth.json"))
+    codex_home()
+        .map(|h| h.join("auth.json"))
         .ok_or_else(|| "找不到用户主目录".to_string())
 }
 
@@ -1859,7 +2205,9 @@ fn html_to_text(html: &str) -> String {
         loop {
             // 注意:to_lowercase 对个别 Unicode 字符会变长,查到的下标必须校验 char 边界后才能用
             let low = s.to_lowercase();
-            let Some(a) = low.find(&format!("<{tag}")) else { break };
+            let Some(a) = low.find(&format!("<{tag}")) else {
+                break;
+            };
             if !s.is_char_boundary(a) || a >= s.len() {
                 break;
             }
@@ -1883,9 +2231,11 @@ fn html_to_text(html: &str) -> String {
             if c == '>' {
                 in_tag = false;
                 let t = tag_buf.trim_start_matches('/').to_lowercase();
-                if ["p", "div", "br", "li", "h1", "h2", "h3", "h4", "tr", "section", "article"]
-                    .iter()
-                    .any(|b| t == *b || t.starts_with(&format!("{b} ")))
+                if [
+                    "p", "div", "br", "li", "h1", "h2", "h3", "h4", "tr", "section", "article",
+                ]
+                .iter()
+                .any(|b| t == *b || t.starts_with(&format!("{b} ")))
                 {
                     out.push('\n');
                 }
@@ -2014,6 +2364,21 @@ pub struct ProjectStat {
     pub edits: u32,
 }
 
+// Multiple working directories can resolve to one repository. Merge counts before
+// applying the actual union of active-minute timestamps later in collection.
+fn merge_project_records(projects: Vec<ProjectStat>) -> Result<Vec<ProjectStat>, String> {
+    let mut merged: HashMap<(Option<String>, String), ProjectStat> = HashMap::new();
+    for project in projects {
+        let identity = (project.repo.clone(), project.name.clone());
+        if let Some(existing) = merged.get_mut(&identity) {
+            existing.tokens = existing.tokens.checked_add(project.tokens).ok_or("PROFILE_TOTAL_OVERFLOW")?;
+            existing.edits = existing.edits.checked_add(project.edits).ok_or("PROFILE_TOTAL_OVERFLOW")?;
+            existing.active_minutes = existing.active_minutes.max(project.active_minutes);
+        } else { merged.insert(identity, project); }
+    }
+    Ok(merged.into_values().collect())
+}
+
 #[derive(Serialize, Default)]
 pub struct SkillStat {
     pub name: String,
@@ -2028,6 +2393,8 @@ pub struct ModelStat {
 
 #[derive(Serialize)]
 pub struct ProfileStats {
+    #[serde(skip)]
+    window_start: String,
     pub period_days: u32,
     pub tokens: u64,
     pub output: u64,
@@ -2071,10 +2438,14 @@ const BUILTIN_COMMANDS: &[&str] = &[
 
 fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
     let root = claude_projects_dir().ok_or("找不到用户目录")?;
-    let cutoff_sys = SystemTime::now() - Duration::from_secs(days as u64 * 86400);
-    let cutoff_day = (chrono::Utc::now() - chrono::Duration::days(days as i64))
-        .format("%Y-%m-%d")
-        .to_string();
+    let cutoff_epoch = (chrono::Utc::now() - chrono::Duration::days(days as i64))
+        .timestamp()
+        .div_euclid(1800)
+        * 1800;
+    let cutoff_date =
+        chrono::DateTime::from_timestamp(cutoff_epoch, 0).ok_or("USAGE_TIME_INVALID")?;
+    let cutoff_sys =
+        SystemTime::UNIX_EPOCH + Duration::from_secs(cutoff_date.timestamp().max(0) as u64);
 
     struct Proj {
         tokens: u64,
@@ -2085,115 +2456,112 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
     let mut models: HashMap<String, u64> = HashMap::new();
     let mut skills: HashMap<String, u32> = HashMap::new();
     let mut sessions: HashSet<String> = HashSet::new();
-    let mut days_set: HashSet<String> = HashSet::new();
     let mut minutes_set: HashSet<String> = HashSet::new();
-    let mut seen: HashSet<String> = HashSet::new();
     let mut total_tokens = 0u64;
     let mut total_input = 0u64;
     let mut total_output = 0u64;
     let mut total_cache_write = 0u64;
     let mut total_cache_read = 0u64;
     let mut total_edits = 0u32;
+    let mut claude_buckets = usage_buckets::Accumulator::default();
 
-    for path in jsonl_files_since(&root, cutoff_sys) {
-        let Ok(file) = fs::File::open(&path) else {
+    for v in usage_logs::scan(
+        &jsonl_files_since(&root, cutoff_sys),
+        cutoff_date.timestamp(),
+    )? {
+        let has_command = v["type"] == "user";
+        let ts = v["timestamp"].as_str().unwrap_or("");
+        let Ok(date) = chrono::DateTime::parse_from_rfc3339(ts) else {
             continue;
         };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let has_usage = line.contains("\"usage\"");
-            let has_command = line.contains("<command-name>");
-            if !has_usage && !has_command {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let ts = v["timestamp"].as_str().unwrap_or("");
-            if ts.is_empty() || ts[..10.min(ts.len())] < cutoff_day[..] {
-                continue;
-            }
+        if date < cutoff_date {
+            continue;
+        }
+        let utc = date.with_timezone(&chrono::Utc);
 
-            // skill 使用:用户消息里的 <command-name>/xxx</command-name>
-            if has_command && v["type"] == "user" {
-                if let Some(content) = v["message"]["content"].as_str() {
-                    if let Some(name) = content
-                        .split("<command-name>")
-                        .nth(1)
-                        .and_then(|s| s.split("</command-name>").next())
-                    {
-                        let name = name.trim().trim_start_matches('/').to_string();
-                        if !name.is_empty() && !BUILTIN_COMMANDS.contains(&name.as_str()) {
-                            *skills.entry(name).or_insert(0) += 1;
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if v["type"] != "assistant" {
-                continue;
-            }
-            let Some(usage) = v["message"]["usage"].as_object() else {
-                continue;
-            };
-            let key = format!(
-                "{}:{}",
-                v["message"]["id"].as_str().unwrap_or(""),
-                v["requestId"]
-                    .as_str()
-                    .unwrap_or_else(|| v["uuid"].as_str().unwrap_or(""))
-            );
-            if !seen.insert(key) {
-                continue;
-            }
-            let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-            let line_tokens = g("input_tokens")
-                + g("output_tokens")
-                + g("cache_creation_input_tokens")
-                + g("cache_read_input_tokens");
-            total_tokens += line_tokens;
-            total_input += g("input_tokens");
-            total_output += g("output_tokens");
-            total_cache_write += g("cache_creation_input_tokens");
-            total_cache_read += g("cache_read_input_tokens");
-            days_set.insert(ts[..10].to_string());
-            minutes_set.insert(ts[..16.min(ts.len())].to_string());
-            if let Some(sid) = v["sessionId"].as_str() {
-                sessions.insert(sid.to_string());
-            }
-            if let Some(model) = v["message"]["model"].as_str() {
-                if model != "<synthetic>" {
-                    *models.entry(model.to_string()).or_insert(0) += line_tokens;
-                }
-            }
-            let mut edits = 0u32;
-            if let Some(content) = v["message"]["content"].as_array() {
-                for item in content {
-                    if item["type"] == "tool_use"
-                        && item["name"]
-                            .as_str()
-                            .is_some_and(|n| EDIT_TOOLS.contains(&n))
-                    {
-                        edits += 1;
+        // skill 使用:用户消息里的 <command-name>/xxx</command-name>
+        if has_command && v["type"] == "user" {
+            if let Some(content) = v["message"]["content"].as_str() {
+                if let Some(name) = content
+                    .split("<command-name>")
+                    .nth(1)
+                    .and_then(|s| s.split("</command-name>").next())
+                {
+                    let name = name.trim().trim_start_matches('/').to_string();
+                    if !name.is_empty() && !BUILTIN_COMMANDS.contains(&name.as_str()) {
+                        *skills.entry(name).or_insert(0) += 1;
                     }
                 }
             }
-            total_edits += edits;
-            if let Some(cwd) = v["cwd"].as_str() {
-                if !cwd.is_empty() {
-                    let p = per_cwd.entry(cwd.to_string()).or_insert_with(|| Proj {
-                        tokens: 0,
-                        edits: 0,
-                        minutes: HashSet::new(),
-                    });
-                    p.tokens += line_tokens;
-                    p.edits += edits;
-                    p.minutes.insert(ts[..16.min(ts.len())].to_string());
+            continue;
+        }
+
+        if v["type"] != "assistant" {
+            continue;
+        }
+        let Some(usage) = v["message"]["usage"].as_object() else {
+            continue;
+        };
+        let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let line_tokens = g("input_tokens")
+            + g("output_tokens")
+            + g("cache_creation_input_tokens")
+            + g("cache_read_input_tokens");
+        claude_buckets.record(
+            "claude",
+            v["message"]["model"].as_str().unwrap_or("claude-unknown"),
+            v["cwd"].as_str(),
+            ts,
+            usage_buckets::Amounts {
+                input: g("input_tokens"),
+                output: g("output_tokens"),
+                cache_read: g("cache_read_input_tokens"),
+                cache_write: g("cache_creation_input_tokens"),
+                reasoning: 0,
+            },
+        );
+        total_tokens += line_tokens;
+        total_input += g("input_tokens");
+        total_output += g("output_tokens");
+        total_cache_write += g("cache_creation_input_tokens");
+        total_cache_read += g("cache_read_input_tokens");
+        minutes_set.insert(utc.format("%Y-%m-%dT%H:%M").to_string());
+        if let Some(sid) = v["sessionId"].as_str() {
+            sessions.insert(sid.to_string());
+        }
+        if let Some(model) = v["message"]["model"].as_str() {
+            if model != "<synthetic>" {
+                *models.entry(model.to_string()).or_insert(0) += line_tokens;
+            }
+        }
+        let mut edits = 0u32;
+        if let Some(content) = v["message"]["content"].as_array() {
+            for item in content {
+                if item["type"] == "tool_use"
+                    && item["name"]
+                        .as_str()
+                        .is_some_and(|n| EDIT_TOOLS.contains(&n))
+                {
+                    edits += 1;
                 }
+            }
+        }
+        total_edits += edits;
+        if let Some(cwd) = v["cwd"].as_str() {
+            if !cwd.is_empty() {
+                let p = per_cwd.entry(cwd.to_string()).or_insert_with(|| Proj {
+                    tokens: 0,
+                    edits: 0,
+                    minutes: HashSet::new(),
+                });
+                p.tokens += line_tokens;
+                p.edits += edits;
+                p.minutes.insert(utc.format("%Y-%m-%dT%H:%M").to_string());
             }
         }
     }
 
+    let mut project_minutes: HashMap<String, HashSet<String>> = HashMap::new();
     let mut projects: Vec<ProjectStat> = per_cwd
         .into_iter()
         .map(|(cwd, p)| {
@@ -2207,17 +2575,22 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
                 .and_then(|r| r.rsplit('/').next())
                 .unwrap_or_else(|| cwd.rsplit('/').next().unwrap_or(&cwd))
                 .to_string();
+            let active_minutes = p.minutes.len() as u32;
+            project_minutes
+                .entry(format!("{}:{name}", repo.as_deref().unwrap_or("")))
+                .or_default()
+                .extend(p.minutes);
             ProjectStat {
                 name,
                 repo,
                 tokens: p.tokens,
-                active_minutes: p.minutes.len() as u32,
+                active_minutes,
                 edits: p.edits,
             }
         })
         .collect();
+    projects = merge_project_records(projects)?;
     projects.sort_by(|a, b| b.tokens.cmp(&a.tokens));
-    projects.truncate(20);
 
     let mut skills_vec: Vec<SkillStat> = skills
         .into_iter()
@@ -2239,29 +2612,79 @@ fn collect_profile_stats(days: u32) -> Result<ProfileStats, String> {
         models: models_vec.clone(),
         // 多日档案不做分时,留空即可
         hourly: Vec::new(),
+        activity_minutes: minutes_set.clone(),
+        buckets: claude_buckets,
+        ..Default::default()
     };
-    let codex_source = collect_codex_usage(&format!("{cutoff_day}T00:00:00"), cutoff_sys);
-    // 与 cutoff_day(UTC 零点)同口径的 epoch 秒
-    let cutoff_epoch = (chrono::Utc::now() - chrono::Duration::days(days as i64))
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .expect("00:00:00 恒为合法时间")
-        .and_utc()
-        .timestamp();
-    let grok_source = collect_grok_usage(cutoff_epoch, cutoff_sys);
-
+    let codex_source = collect_codex_usage(&cutoff_date.to_rfc3339(), cutoff_sys)?;
+    let grok_source = collect_grok_usage(cutoff_date.timestamp(), cutoff_sys)?;
+    let sources = vec![claude_source, codex_source, grok_source];
+    let minutes: HashSet<String> = sources
+        .iter()
+        .flat_map(|s| s.activity_minutes.iter().cloned())
+        .collect();
+    let active_days = minutes
+        .iter()
+        .filter_map(|s| s.get(..10))
+        .collect::<HashSet<_>>()
+        .len();
+    for source in &sources {
+        for (cwd, p) in &source.project_activity {
+            let repo = git(cwd, &["config", "--get", "remote.origin.url"])
+                .filter(|x| !x.is_empty())
+                .map(|x| normalize_repo(&x));
+            let name = repo
+                .as_deref()
+                .and_then(|s| s.rsplit('/').next())
+                .unwrap_or_else(|| cwd.rsplit('/').next().unwrap_or(cwd))
+                .to_string();
+            let identity = format!("{}:{name}", repo.as_deref().unwrap_or(""));
+            project_minutes.entry(identity).or_default().extend(
+                source
+                    .project_minutes
+                    .get(cwd)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            if let Some(existing) = projects
+                .iter_mut()
+                .find(|x| x.repo == repo && x.name == name)
+            {
+                existing.tokens += p.tokens;
+            } else {
+                projects.push(ProjectStat {
+                    name,
+                    repo,
+                    tokens: p.tokens,
+                    active_minutes: 0,
+                    edits: 0,
+                });
+            }
+        }
+    }
+    for project in &mut projects {
+        let identity = format!("{}:{}", project.repo.as_deref().unwrap_or(""), project.name);
+        if let Some(minutes) = project_minutes.get(&identity) {
+            project.active_minutes = minutes.len() as u32;
+        }
+    }
+    projects.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    projects.truncate(20);
+    let (tokens, output, sessions) = source_totals(&sources);
     Ok(ProfileStats {
+        window_start: cutoff_date.to_rfc3339(),
         period_days: days,
-        tokens: total_tokens,
-        output: total_output,
-        sessions: sessions.len(),
-        active_days: days_set.len(),
-        active_minutes: minutes_set.len(),
+        tokens,
+        output,
+        sessions,
+        active_days,
+        active_minutes: minutes.len(),
         edits: total_edits,
         skills: skills_vec,
-        models: models_vec,
+        models: all_source_models(&sources),
         projects,
-        sources: vec![claude_source, codex_source, grok_source],
+        sources,
     })
 }
 
@@ -2272,33 +2695,227 @@ async fn profile_stats(days: u32) -> Result<ProfileStats, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Preserve existing Skills/activity summaries without exporting repository names or local paths.
+fn private_profile_summary(stats: &ProfileStats, device: &str) -> serde_json::Value {
+    let projects:Vec<_>=stats.projects.iter().map(|p|serde_json::json!({
+        "projectKey":usage_buckets::digest(format!("{device}:profile:{}:{}",p.repo.as_deref().unwrap_or(""),p.name).as_bytes()),
+        "tokens":p.tokens.to_string(),"activeMinutes":p.active_minutes,"edits":p.edits
+    })).collect();
+    serde_json::json!({"periodDays":stats.period_days,"windowStart":stats.window_start,"asOf":chrono::Utc::now().to_rfc3339(),"activeDays":stats.active_days,"activeMinutes":stats.active_minutes,"sessions":stats.sessions,"edits":stats.edits,"skills":stats.skills,"projects":projects})
+}
+
+fn desktop_endpoint(base: Option<String>, route: &str) -> Result<String, String> {
+    let base = base.unwrap_or_else(|| "https://hackertrip.space".into());
+    if !matches!(
+        base.as_str(),
+        "https://hackertrip.space" | "https://hackertrip.cn"
+    ) {
+        return Err("INVALID_HACKERTRIP_ORIGIN".into());
+    }
+    Ok(format!("{base}{route}"))
+}
+fn counter_value(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_str()?.parse().ok())
+}
+fn private_project(mut project: ProjectStat) -> ProjectStat {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    project.name.hash(&mut hash);
+    project.repo.hash(&mut hash);
+    project.name = format!("project-{:016x}", hash.finish());
+    project.repo = None;
+    project
+}
+
+fn usage_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .https_only(true)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent()
+}
+fn usage_http(
+    agent: &ureq::Agent,
+    url: &str,
+    key: &str,
+    body: Option<&usage_sync::Batch>,
+) -> Result<serde_json::Value, String> {
+    let auth = format!("Bearer {key}");
+    let response = match body {
+        Some(body) => agent
+            .post(url)
+            .header("Authorization", &auth)
+            .send_json(body),
+        None => agent.get(url).header("Authorization", &auth).call(),
+    };
+    let mut response = response.map_err(|_| "USAGE_NETWORK_FAILED")?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|_| "USAGE_RESPONSE_UNREADABLE")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| "USAGE_SERVICE_UNAVAILABLE")?;
+    if !(200..300).contains(&status) {
+        if status == 401 {
+            return Err("DESKTOP_AUTH_EXPIRED".into());
+        }
+        let code = value["code"]
+            .as_str()
+            .filter(|x| x.len() <= 60 && x.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
+            .unwrap_or("USAGE_SERVICE_UNAVAILABLE");
+        return Err(code.into());
+    }
+    if value["store"] != "postgres" || value["envId"] != "hackertrip-pgsql-d5e5tt2fe86e9c6" {
+        return Err("USAGE_RESPONSE_INVALID".into());
+    }
+    Ok(value)
+}
+fn device_sequence(value: &serde_json::Value, device: &str) -> Result<u64, String> {
+    let rows = value["devices"]
+        .as_array()
+        .ok_or("USAGE_DEVICE_RESPONSE_INVALID")?;
+    for row in rows {
+        if row["deviceId"] == device {
+            if !row["revokedAt"].is_null() {
+                return Err("DEVICE_REVOKED".into());
+            }
+            return row["lastSequence"]
+                .as_u64()
+                .ok_or("USAGE_DEVICE_RESPONSE_INVALID".into());
+        }
+    }
+    Ok(0)
+}
+fn send_pending(
+    agent: &ureq::Agent,
+    url: &str,
+    key: &str,
+    user: &str,
+    device: &str,
+    state: &mut usage_sync::State,
+    file: &std::path::Path,
+    batch: &usage_sync::Batch,
+) -> Result<String, String> {
+    // Persist first, including batch ID. Any error after this point replays the identical batch.
+    state.save(file)?;
+    let receipt = match usage_http(agent, url, key, Some(batch)) {
+        Err(error) if error == "STALE_BATCH" || error == "INVALID_PROFILE" => {
+            let latest = usage_http(agent, &format!("{url}?view=devices"), key, None)?;
+            if latest["userId"] != user {
+                return Err("USAGE_ACCOUNT_RESPONSE_INVALID".into());
+            }
+            let last_accepted = device_sequence(&latest, device)?;
+            // Never replace a pending sequence that may already have been accepted.
+            if error == "INVALID_PROFILE" && last_accepted >= batch.sequence {
+                return Err("USAGE_RECEIPT_INVALID".into());
+            }
+            state.reject_stale(last_accepted)?;
+            state.save(file)?;
+            return Err("SYNC_REBASED_RETRY".into());
+        }
+        value => value?,
+    };
+    if receipt["ok"] != true
+        || receipt["userId"] != user
+        || receipt["batchId"] != batch.batch_id
+        || receipt["bucketCount"].as_u64() != Some(batch.buckets.len() as u64)
+    {
+        return Err("USAGE_RECEIPT_INVALID".into());
+    }
+    let accepted = receipt["acceptedAt"]
+        .as_str()
+        .filter(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        .ok_or("USAGE_RECEIPT_INVALID")?
+        .to_string();
+    let readback = usage_http(agent, &format!("{url}?view=devices"), key, None)?;
+    if readback["userId"] != user || device_sequence(&readback, device)? < batch.sequence {
+        return Err("USAGE_READBACK_FAILED".into());
+    }
+    state.acknowledge(&batch.batch_id)?;
+    state.align_sequence(device_sequence(&readback, device)?)?;
+    state.save(file)?;
+    Ok(accepted)
+}
+#[tauri::command]
+async fn sync_usage(include_receipt: Option<bool>) -> Result<String, String> {
+    static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard=SYNC_LOCK.try_lock().map_err(|_|"SYNC_ALREADY_RUNNING")?;
+        let key=credentials::load()?.ok_or("DESKTOP_NOT_BOUND")?;
+        let base=desktop_endpoint(None,"")?;let url=format!("{base}/api/desktop/usage");let agent=usage_agent();
+        let devices=usage_http(&agent,&format!("{url}?view=devices"),&key,None)?;
+        let user=devices["userId"].as_str().filter(|s|uuid::Uuid::parse_str(s).is_ok()).ok_or("USAGE_ACCOUNT_RESPONSE_INVALID")?.to_string();
+        let home=dirs::home_dir().ok_or("HOME_UNAVAILABLE")?.join(".haki");let device=usage_sync::device_id(&home)?;
+        let last_sequence=device_sequence(&devices,&device)?;
+        let file=usage_sync::state_path(&home.join("usage-state"),&base,&user,&device);
+        std::fs::create_dir_all(file.parent().ok_or("SYNC_STATE_PATH_INVALID")?).map_err(|_|"SYNC_STATE_UNWRITABLE")?;
+        let mut options=fs::OpenOptions::new();options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]{use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+        let disk_lock=options.open(file.with_extension("lock")).map_err(|_|"SYNC_STATE_UNWRITABLE")?;
+        disk_lock.try_lock().map_err(|_|"SYNC_ALREADY_RUNNING")?;
+        let mut state=usage_sync::State::load(&file)?;state.align_sequence(last_sequence)?;
+        state.receipt_policy(include_receipt.unwrap_or(false),last_sequence)?;
+        let mut sent=0;let mut accepted=chrono::Utc::now().to_rfc3339();
+        if let Some(pending)=state.pending_batch() {
+            match send_pending(&agent,&url,&key,&user,&device,&mut state,&file,&pending) {
+                Ok(value) => { accepted=value;sent+=1; }
+                Err(error) if error=="SYNC_REBASED_RETRY" => {}
+                Err(error) => return Err(error),
+            }
+        }
+        // Profile and cloud windows share the same complete half-hour boundary.
+        let stats=collect_profile_stats(30)?;let profile=private_profile_summary(&stats,&device);let mut buckets=Vec::new();
+        let cutoff=chrono::DateTime::parse_from_rfc3339(&stats.window_start).map_err(|_|"USAGE_TIME_INVALID")?.timestamp();
+        for source in &stats.sources {
+            let normalized=source.buckets.export(&device)?;
+            let total=normalized.iter().try_fold(0u64,|sum,b|sum.checked_add(b.amounts.total()?)).ok_or("USAGE_NORMALIZATION_FAILED")?;
+            if total!=source.total{return Err("USAGE_NORMALIZATION_MISMATCH".into());}
+            buckets.extend(normalized.into_iter().filter(|b|chrono::DateTime::parse_from_rfc3339(&b.bucket_start).is_ok_and(|d|d.timestamp()>=cutoff)));
+        }
+        let receipt=if include_receipt.unwrap_or(false) {
+            let providers:Vec<_>=["claude","codex"].iter().filter_map(|c|current_provider_value(c).ok()).map(|v|serde_json::json!({"cli":v["cli"],"providerId":v["provider_id"],"name":v["name"]})).collect();
+            Some(serde_json::json!({"providers":providers,"clis":detected_clis()}))
+        }else{None};
+        while let Some(batch)=state.prepare_with_profile(&device,env!("CARGO_PKG_VERSION"),&buckets,receipt.clone(),Some(profile.clone()))? {
+            accepted=send_pending(&agent,&url,&key,&user,&device,&mut state,&file,&batch)?;sent+=1;
+        }
+        state.prune(&buckets)?;state.save(&file)?;
+        // This is a canonical cloud read, never a fallback to the old rolling snapshot table.
+        let summary=usage_http(&agent,&format!("{url}?periodDays=30"),&key,None)?;
+        if summary["userId"]!=user||!summary["totalTokens"].is_string(){return Err("USAGE_READBACK_FAILED".into());}
+        Ok(serde_json::json!({"ok":true,"verified":true,"batchesSent":sent,"syncedAt":accepted,"userId":user}).to_string())
+    }).await.map_err(|_|"USAGE_SYNC_FAILED".to_string())?
+}
+
 /// 聚合并上报到 HackerTrip 云端(绑定 API Key 对应的账号)
 #[tauri::command]
 async fn sync_profile(
-    api_key: String,
     days: u32,
     endpoint: Option<String>,
     include_receipt: Option<bool>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let api_key = credentials::load()?.ok_or("DESKTOP_NOT_BOUND")?;
         let stats = collect_profile_stats(days.clamp(1, 365))?;
-        let url =
-            endpoint.unwrap_or_else(|| "https://hackertrip.space/api/desktop/stats".to_string());
-        // 隐私口径「本地路径不出本机」:无远程仓库的项目名只在本地 UI 显示,
-        // 上云载荷里替换成短哈希占位——服务端仍可区分项目,但看不出目录叫什么
+        let url = match endpoint {
+            None => desktop_endpoint(None, "/api/desktop/stats")?,
+            Some(url)
+                if url == "https://hackertrip.space/api/desktop/stats"
+                    || url == "https://hackertrip.cn/api/desktop/stats" =>
+            {
+                url
+            }
+            _ => return Err("INVALID_HACKERTRIP_ORIGIN".into()),
+        };
+        // Default sync never exposes project names or private repository URLs.
         let projects: Vec<ProjectStat> = stats
             .projects
             .iter()
             .cloned()
-            .map(|mut p| {
-                if p.repo.is_none() {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    p.name.hash(&mut h);
-                    p.name = format!("local-{:06x}", h.finish() & 0xFF_FFFF);
-                }
-                p
-            })
+            .map(private_project)
             .collect();
         let mut payload = serde_json::json!({
             "periodDays": stats.period_days,
@@ -2323,6 +2940,7 @@ async fn sync_profile(
             let providers: Vec<serde_json::Value> = ["claude", "codex"]
                 .iter()
                 .filter_map(|c| current_provider_value(c).ok())
+                .map(|v|serde_json::json!({"cli":v["cli"],"provider_id":v["provider_id"],"name":v["name"]}))
                 .collect();
             payload["receipt"] = serde_json::json!({
                 "providers": providers,
@@ -2333,10 +2951,37 @@ async fn sync_profile(
             .header("Authorization", &format!("Bearer {}", api_key.trim()))
             .send_json(payload);
         match resp {
-            Ok(mut r) => Ok(r
-                .body_mut()
-                .read_to_string()
-                .unwrap_or_else(|_| "{\"ok\":true}".into())),
+            Ok(mut response) => {
+                let text = response
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|_| "SYNC_RESPONSE_UNREADABLE")?;
+                let receipt: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|_| "SYNC_RESPONSE_INVALID")?;
+                if receipt["ok"] != true || !receipt["userId"].is_string() {
+                    return Err("SYNC_RESPONSE_INVALID".into());
+                }
+                let mut readback = ureq::get(&format!("{url}?periodDays={}", stats.period_days))
+                    .header("Authorization", &format!("Bearer {}", api_key.trim()))
+                    .call()
+                    .map_err(|_| "SYNC_READBACK_FAILED")?;
+                let body = readback
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|_| "SYNC_READBACK_FAILED")?;
+                let stored: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|_| "SYNC_READBACK_FAILED")?;
+                if stored["stats"]["userId"] != receipt["userId"]
+                    || counter_value(&stored["stats"]["totalTokens"]) != Some(stats.tokens)
+                    || counter_value(&stored["stats"]["outputTokens"]) != Some(stats.output)
+                {
+                    return Err("SYNC_READBACK_MISMATCH".into());
+                }
+                Ok(
+                    serde_json::json!({"ok":true,"verified":true,"syncedAt":receipt["syncedAt"]})
+                        .to_string(),
+                )
+            }
             Err(ureq::Error::StatusCode(code)) => {
                 Err(format!("服务端返回 {code}(检查 API Key 是否有效)"))
             }
@@ -2347,100 +2992,79 @@ async fn sync_profile(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn desktop_credential_status() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| credentials::load().map(|v| v.is_some()))
+        .await
+        .map_err(|_| "KEYCHAIN_READ_FAILED".to_string())?
+}
+#[tauri::command]
+async fn save_desktop_credential(api_key: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if api_key.is_empty() {
+            credentials::clear()?;
+            Ok(false)
+        } else {
+            credentials::save(api_key.trim())?;
+            Ok(true)
+        }
+    })
+    .await
+    .map_err(|_| "KEYCHAIN_SAVE_FAILED".to_string())?
+}
+
 // ============ GitHub 登录(浏览器授权 + 本地回环回调) ============
 
 /// 打开浏览器走网站的 GitHub OAuth,本地起临时端口接收回调,拿回 API Key。
 /// 全程密钥只经过 127.0.0.1 回环,不落中间服务。
 #[tauri::command]
-async fn github_login(endpoint_base: Option<String>) -> Result<String, String> {
-    use std::io::{Read, Write};
+async fn github_login(endpoint_base: Option<String>) -> Result<bool, String> {
+    use std::io::Read;
     use std::net::TcpListener;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let base = endpoint_base.unwrap_or_else(|| "https://hackertrip.space".to_string());
+        let base = desktop_endpoint(endpoint_base, "")?;
         let listener =
             TcpListener::bind("127.0.0.1:0").map_err(|e| format!("本地端口监听失败: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        // state 防跨请求伪造:纳秒时间戳 + pid
-        let state = format!(
-            "{}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-            std::process::id()
-        );
+        // Unpredictable state, never a timestamp/PID-derived secret.
+        let mut random = [0u8; 32];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut random))
+            .map_err(|_| "AUTH_RANDOM_UNAVAILABLE")?;
+        let state = random
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
 
-        let auth_url = format!("{base}/api/desktop/auth?state={state}&port={port}");
+        let home = dirs::home_dir().ok_or("HOME_UNAVAILABLE")?;
+        let device = usage_sync::device_id(&home.join(".haki"))?;
+        let auth_url =
+            format!("{base}/api/desktop/auth?state={state}&port={port}&deviceId={device}");
         Command::new("open")
             .arg(&auth_url)
             .spawn()
             .map_err(|e| format!("打开浏览器失败: {e}"))?;
 
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| e.to_string())?;
-        // 10 分钟内等待浏览器回调(首次可能要走完整 GitHub 授权,耗时较长)
-        let deadline = std::time::Instant::now() + Duration::from_secs(600);
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| e.to_string())?;
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((s, _)) => break s,
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() > deadline {
-                        return Err("等待登录超时,请重试(已在网站登录的话,重点一次按钮即可)".into());
-                    }
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-                Err(e) => return Err(format!("接收回调失败: {e}")),
+        let (mut stream, key) =
+            desktop_callback::receive(listener, &state, Duration::from_secs(600))?;
+        match credentials::save(&key) {
+            Ok(()) => {
+                desktop_callback::respond(
+                    &mut stream,
+                    "200 OK",
+                    "账号授权已安全保存，可以返回 Haki。",
+                );
+                Ok(true)
             }
-        };
-        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-
-        let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
-        let request = String::from_utf8_lossy(&buf[..n]);
-        let first_line = request.lines().next().unwrap_or("");
-        // 形如 GET /callback?key=ht_live_xxx&state=yyy HTTP/1.1
-        let query = first_line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|p| p.split_once('?'))
-            .map(|(_, q)| q)
-            .unwrap_or("");
-        let mut key = String::new();
-        let mut got_state = String::new();
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                match k {
-                    "key" => key = v.to_string(),
-                    "state" => got_state = v.to_string(),
-                    _ => {}
-                }
+            Err(error) => {
+                desktop_callback::respond(
+                    &mut stream,
+                    "503 Service Unavailable",
+                    "系统钥匙串保存失败，请返回 Haki 重试。",
+                );
+                Err(error)
             }
-        }
-
-        let ok = !key.is_empty() && got_state == state && key.starts_with("ht_live_");
-        let body = if ok {
-            "<html><meta charset=utf-8><body style='background:#0a080e;color:#f2eef5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh'><div style='text-align:center'><h2>✅ 登录成功</h2><p>账号已绑定,可以回到 HackerTrip 桌面应用了</p></div></body></html>"
-        } else {
-            "<html><meta charset=utf-8><body style='background:#0a080e;color:#f2eef5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh'><div style='text-align:center'><h2>登录失败</h2><p>请回到应用重试</p></div></body></html>"
-        };
-        let _ = stream.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .as_bytes(),
-        );
-
-        if ok {
-            Ok(key)
-        } else {
-            Err("回调校验失败,请重试".into())
         }
     })
     .await
@@ -2449,12 +3073,10 @@ async fn github_login(endpoint_base: Option<String>) -> Result<String, String> {
 
 /// 用 API Key 找服务端要一个小程序绑定码(6 位,10 分钟有效)
 #[tauri::command]
-async fn request_pair_code(
-    api_key: String,
-    endpoint_base: Option<String>,
-) -> Result<String, String> {
+async fn request_pair_code(endpoint_base: Option<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let base = endpoint_base.unwrap_or_else(|| "https://hackertrip.space".to_string());
+        let api_key = credentials::load()?.ok_or("DESKTOP_NOT_BOUND")?;
+        let base = desktop_endpoint(endpoint_base, "")?;
         let resp = ureq::post(&format!("{base}/api/pair/code"))
             .header("Authorization", &format!("Bearer {}", api_key.trim()))
             .send_json(serde_json::json!({}));
@@ -2631,26 +3253,65 @@ async fn push_work(
     .map_err(|e| e.to_string())?
 }
 
-/// 读 vibe-usage daemon 落在本地的额度快照(~/.vibe-usage/*-rate-limits.json)。
-/// 没装 vibe-usage 时返回空对象,前端自己降级。
+/// Offline first-party quota observations, independent of VibeUsage.
 #[tauri::command]
-fn rate_limits() -> HashMap<String, serde_json::Value> {
-    let mut m = HashMap::new();
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return m;
-    };
-    let dir = home.join(".vibe-usage");
-    for (key, file) in [
-        ("claude", "claude-rate-limits.json"),
-        ("codex", "codex-rate-limits.json"),
-    ] {
-        if let Ok(s) = fs::read_to_string(dir.join(file)) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                m.insert(key.to_string(), v);
+async fn rate_limits() -> Result<HashMap<String, serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let now = chrono::Utc::now().timestamp();
+        let mut m = HashMap::new();
+        if let Some(root) = codex_sessions_dir() {
+            m.insert("codex".into(), quota::codex(&root, now));
+        }
+        if let Some(root) = dirs::home_dir() {
+            m.insert("claude".into(), quota::claude(&root.join(".haki"), now));
+        }
+        m
+    })
+    .await
+    .map_err(|_| "QUOTA_READ_FAILED".into())
+}
+
+pub fn usage_diagnostics() -> Result<serde_json::Value, String> {
+    let started = std::time::Instant::now();
+    let today = collect_usage_today()?;
+    let profile = collect_profile_stats(7)?;
+    let (tokens, output, sessions) = source_totals(&profile.sources);
+    let normalized_match = |sources: &[SourceUsage]| -> Result<bool, String> {
+        for source in sources {
+            let rows = source.buckets.export("diagnostic-local-only")?;
+            let total = rows
+                .iter()
+                .try_fold(0u64, |sum, row| sum.checked_add(row.amounts.total()?))
+                .ok_or("USAGE_NORMALIZATION_FAILED")?;
+            if total != source.total {
+                return Ok(false);
             }
         }
-    }
-    m
+        Ok(true)
+    };
+    let normalized_today = normalized_match(&today.sources)?;
+    let normalized_profile = normalized_match(&profile.sources)?;
+    let now = chrono::Utc::now().timestamp();
+    let quota = codex_sessions_dir()
+        .map(|p| quota::codex(&p, now))
+        .unwrap_or(serde_json::Value::Null);
+    Ok(
+        serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"todaySources":today.sources.iter().map(|x|&x.source).collect::<Vec<_>>(),
+        "hasUsage":today.sources.iter().any(|s|s.total>0),"profileTotalsMatchSources":tokens==profile.tokens&&output==profile.output&&sessions==profile.sessions,
+        "codexQuotaStatus":quota["status"],"codexFiveHourObserved":quota["fiveHour"].is_object(),"codexWeeklyObserved":quota["sevenDay"].is_object(),"readsVibeUsageCache":false,"todayNormalizedBucketsMatch":normalized_today,"profileNormalizedBucketsMatch":normalized_profile,"elapsedMs":started.elapsed().as_millis()}),
+    )
+}
+
+/// Entry for Claude Code's optional statusLine command. Does not modify Claude settings.
+pub fn capture_claude_quota() -> Result<(), String> {
+    use std::io::Read;
+    let mut input = Vec::new();
+    std::io::stdin()
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut input)
+        .map_err(|_| "STATUSLINE_READ_FAILED")?;
+    let home = dirs::home_dir().ok_or("HOME_UNAVAILABLE")?;
+    quota::capture_claude(&input, &home.join(".haki"), chrono::Utc::now().timestamp())
 }
 
 /// Gemini 配额百分比,照 vibeusage 的方式:
@@ -2767,12 +3428,203 @@ fn app_meta() -> HashMap<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn multiple_worktrees_share_one_project_without_losing_counts() {
+        let p=|repo:&str,tokens,minutes,edits|ProjectStat{name:"same-name".into(),repo:Some(repo.into()),tokens,active_minutes:minutes,edits};
+        let rows=merge_project_records(vec![p("repo-a",5,3,1),p("repo-a",7,4,2),p("repo-b",9,2,1)]).unwrap();
+        assert_eq!(rows.len(),2);
+        let merged=rows.iter().find(|r|r.repo.as_deref()==Some("repo-a")).unwrap();
+        assert_eq!((merged.tokens,merged.active_minutes,merged.edits),(12,4,3));
+        assert!(merge_project_records(vec![p("repo-a",u64::MAX,1,0),p("repo-a",1,1,0)]).is_err());
+    }
+    #[test]
+    fn desktop_destinations_are_pinned_and_projects_are_private() {
+        assert!(desktop_endpoint(
+            Some("https://attacker.invalid".into()),
+            "/api/desktop/stats"
+        )
+        .is_err());
+        assert!(
+            desktop_endpoint(Some("https://hackertrip.cn".into()), "/api/desktop/stats").is_ok()
+        );
+        let project = ProjectStat {
+            name: "PRIVATE_REPO".into(),
+            repo: Some("https://private.invalid/PRIVATE_REPO".into()),
+            tokens: 9,
+            active_minutes: 2,
+            edits: 1,
+        };
+        let safe = private_project(project);
+        let payload = serde_json::to_string(&safe).unwrap();
+        assert!(!payload.contains("PRIVATE"));
+        assert!(safe.repo.is_none());
+        assert_eq!(safe.tokens, 9);
+    }
+    #[test]
+    fn private_profile_preserves_skills_activity_and_exact_tokens_without_repo_names() {
+        let now = chrono::Utc::now();
+        let start = chrono::DateTime::from_timestamp(
+            (now - chrono::Duration::days(30))
+                .timestamp()
+                .div_euclid(1800)
+                * 1800,
+            0,
+        )
+        .unwrap();
+        let stats = ProfileStats {
+            window_start: start.to_rfc3339(),
+            period_days: 30,
+            tokens: 42,
+            output: 1,
+            sessions: 1,
+            active_days: 1,
+            active_minutes: 10,
+            edits: 1,
+            skills: vec![SkillStat {
+                name: "fixture-skill".into(),
+                count: 2,
+            }],
+            models: vec![],
+            projects: vec![ProjectStat {
+                name: "PRIVATE_NAME".into(),
+                repo: Some("https://private.invalid/PRIVATE_REPO".into()),
+                tokens: u64::MAX,
+                active_minutes: 5,
+                edits: 1,
+            }],
+            sources: vec![],
+        };
+        let value = private_profile_summary(&stats, "device-a");
+        let encoded = value.to_string();
+        assert!(!encoded.contains("PRIVATE"));
+        assert!(!encoded.contains("private.invalid"));
+        assert_eq!(value["skills"][0]["count"], 2);
+        assert_eq!(value["projects"][0]["tokens"], u64::MAX.to_string());
+        assert_eq!(value["projects"][0]["activeMinutes"], 5);
+        assert_eq!(value["windowStart"], start.to_rfc3339());
+        assert!(chrono::DateTime::parse_from_rfc3339(value["asOf"].as_str().unwrap()).is_ok());
+        assert_ne!(
+            value["projects"][0]["projectKey"],
+            private_profile_summary(&stats, "device-b")["projects"][0]["projectKey"]
+        );
+    }
+    #[test]
+    fn today_cutoff_is_a_parseable_instant() {
+        let cutoff = chrono::DateTime::parse_from_rfc3339(&local_today_start_utc()).unwrap();
+        assert_eq!(cutoff.timestamp(), local_today_start_epoch());
+        assert!(cutoff <= chrono::Utc::now());
+    }
+    #[test]
+    fn source_summary_includes_every_cli() {
+        let sources = vec![
+            SourceUsage {
+                source: "claude".into(),
+                total: 10,
+                output: 2,
+                sessions: 1,
+                models: vec![ModelStat {
+                    model: "shared".into(),
+                    tokens: 10,
+                }],
+                ..Default::default()
+            },
+            SourceUsage {
+                source: "codex".into(),
+                total: 30,
+                output: 7,
+                sessions: 2,
+                models: vec![ModelStat {
+                    model: "shared".into(),
+                    tokens: 30,
+                }],
+                ..Default::default()
+            },
+            SourceUsage {
+                source: "grok".into(),
+                total: 5,
+                output: 1,
+                sessions: 1,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(source_totals(&sources), (45, 10, 4));
+        assert_eq!(all_source_models(&sources)[0].tokens, 40);
+    }
+    #[test]
+    fn codex_deduplicates_replay_without_merging_distinct_sessions() {
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!("haki-usage-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let event = json!({"type":"event_msg","timestamp":"2026-11-03T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":5},"total_token_usage":{"total_tokens":1000}}}});
+        let session = |id: &str| {
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"type":"session_meta","payload":{"id":id,"cwd":"/fixture/project"}}),
+                json!({"type":"turn_context","payload":{"model":"fixture-model"}}),
+                event
+            )
+        };
+        let mut repeated = event.clone();
+        repeated["timestamp"] = json!("2026-11-03T10:01:00Z");
+        fs::write(
+            root.join("a.jsonl"),
+            format!("{}{}\n", session("session-a"), repeated),
+        )
+        .unwrap();
+        fs::write(root.join("replay.jsonl"), session("session-a")).unwrap();
+        fs::write(root.join("b.jsonl"), session("session-b")).unwrap();
+        let source =
+            collect_codex_usage_at(&root, "2026-11-03T00:00:00Z", SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(source.total, 220);
+        assert_eq!(source.cache_read, 160);
+        assert_eq!(source.input, 40);
+        assert_eq!(source.output, 20);
+        assert_eq!(source.sessions, 2);
+        assert_eq!(source.project_activity["/fixture/project"].tokens, 220);
+        assert_eq!(source.activity_minutes.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    #[cfg(unix)]
+    fn git_probe_timeout_covers_its_subprocess_tree() {
+        let root = std::env::temp_dir();
+        let started = std::time::Instant::now();
+        assert!(git(
+            root.to_str().unwrap(),
+            &[
+                "-c",
+                "alias.haki-local-timeout=!sleep 10",
+                "haki-local-timeout"
+            ]
+        )
+        .is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "timed-out Git subprocess kept its output pipe alive"
+        );
+        assert!(git(
+            root.to_str().unwrap(),
+            &[
+                "-c",
+                "alias.haki-local-large=!yes fixture",
+                "haki-local-large"
+            ]
+        )
+        .is_none());
+        let inherited = std::time::Instant::now();
+        assert!(git(
+            root.to_str().unwrap(),
+            &["-c", "alias.haki-local-pipe=!sleep 10 &", "haki-local-pipe"]
+        )
+        .is_none());
+        assert!(inherited.elapsed() < Duration::from_secs(4));
+    }
     /// 冒烟:跑真实本地日志,人工核对数字(依赖本机数据,CI 上跳过)
     /// cargo test smoke_usage -- --ignored --nocapture
     #[test]
     #[ignore]
     fn smoke_usage() {
-        let u = usage_today().expect("usage_today 应能扫描本地日志");
+        let u = collect_usage_today().expect("usage_today 应能扫描本地日志");
         println!(
             "claude 今日: all={} sessions={} files={} models={:?}",
             u.all,
@@ -2808,7 +3660,8 @@ mod tests {
         let g = collect_grok_usage(
             chrono::Utc::now().timestamp() - 90 * 86400,
             SystemTime::now() - Duration::from_secs(90 * 86400),
-        );
+        )
+        .unwrap();
         println!("gemini quota: {}", fetch_gemini_quota());
         println!(
             "grok 90d: total={} in={} out={} cr={} sessions={} models={:?}",
@@ -2853,6 +3706,9 @@ pub fn run() {
             gemini_quota,
             profile_stats,
             sync_profile,
+            sync_usage,
+            desktop_credential_status,
+            save_desktop_credential,
             github_login,
             request_pair_code,
             app_meta
@@ -2860,3 +3716,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod usage_transport_tests;

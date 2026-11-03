@@ -1,0 +1,52 @@
+{
+  "verifiedAt": "2026-11-03T18:08:19.832641+00:00",
+  "version": "0.1.1",
+  "rust": {
+    "passed": 38,
+    "ignored": 2
+  },
+  "sqlChecks": 23,
+  "actualNextRouteChecks": 19,
+  "realAuthSqlChecks": 10,
+  "viewChecks": 5,
+  "pricingChecks": 5,
+  "actualAccountOAuth": true,
+  "githubLinked": true,
+  "keychainSaveAndReload": true,
+  "realDeviceIngestion": true,
+  "websitePersonalUsageReadback": true,
+  "repeatedSyncKeepsClosedHistory": true,
+  "revokeInvalidatesCredential": true,
+  "sameDeviceReauthorizationAndSync": true,
+  "historicalDataRetainedAfterRevoke": true,
+  "testScope": "One real account/device; local isolated fault and permission tests. Provider billing totals are not asserted.",
+  "artifacts": {
+    "Haki_0.1.1_universal.dmg": "5eb60a060951f8ef536191a5b11a98f5713c053137fb045c3cc8bc3682cbc8f8",
+    "Haki_0.1.1_universal.app.zip": "dcb0d8694a8ce12f758a0b5de5ae309d3e4b8d40c2d5add639bd7d31e4d642b5"
+  },
+  "appleNotary": {
+    "notary-app.json": "Accepted",
+    "notary-dmg.json": "Accepted"
+  },
+  "sourceHashes": {
+    "app/index.html": "de77d292dc7242d3713dd71651ecd97a276e17b39d68d856bc9913c703fa2ce3",
+    "app/src/main.ts": "74b65efd2c016dd11f189221329312bf7107325769355ff110ea5461b3391038",
+    "app/src/usage-cost.ts": "b45c06969bb593e796822148a9d2e322dd993bfbbe1bacb6db561d2ec79af38c",
+    "app/src-tauri/Cargo.toml": "b897bb51fb9f6225262f96218ba44216dc7449991127cd54ad8107d0867048a4",
+    "app/src-tauri/Cargo.lock": "9ca13fe556e2072de7dea8b162835e03e0deb2f94ec9019ae738e16b55cbc367",
+    "app/src-tauri/src/lib.rs": "3a19d9d4b4d82c212d59fac2ded3d7e557b2842462f76f831d0d7e23d15b72f2",
+    "app/src-tauri/src/main.rs": "a74c3e133f1c3eb11a55861aa6fbdf14c4fbfec45163bf74bbc3158f26069bb4",
+    "app/src-tauri/src/credentials.rs": "c7a014aae03e95e138390100f01fff03c4d53e25375d81adddb8a47b4973f2b6",
+    "app/src-tauri/src/desktop_callback.rs": "e37bcdcb67908de71af33544cc17003bac7d72de01e24226d76b956add82c865",
+    "app/src-tauri/src/quota.rs": "db375b775b25c81475dbc13f941b2e6e2cee464ff5ab0704cd0b46453d2b535f",
+    "app/src-tauri/src/usage_buckets.rs": "f9d0209c83d5891db8eda80832e91eb38d2375888b97109d621b2ae95b132e76",
+    "app/src-tauri/src/usage_logs.rs": "fb9aff7708e82a4f7f8be82e740ee7d869d9c89afd398fe3066858f839116f14",
+    "app/src-tauri/src/usage_sync.rs": "090ae12eef68221a723ef60b0ce2fda58fda13d928faf65a6a42dc1270666f44",
+    "app/src-tauri/src/usage_transport_tests.rs": "89cf6bcd5787b52a024818bf38ef5f864c10f78ae4cd3f077607464c9bf6380d",
+    "tests/usage-cost.test.ts": "df91b8787648632456775553286735e6c79a6024928a2cb833d41e2cf3e2b4a2",
+    "docs/claude-quota-setup.md": "c510a798dc6398e28beea932e5e82d5bbe40eade83b5fbf525cc26a4bba43281",
+    "app/package.json": "8bdf197fb640bdfa52272f52554a7685649368ddb421d28d540f2bce597f206e",
+    "app/package-lock.json": "16dc533e52e1f01052e9958d26005e06ceae367d2da68d4a1709d1d753f0f3d9",
+    "app/src-tauri/tauri.conf.json": "87f8297368410b66669c4c3b7848b6213f958f2357416b35a6064666d79c65b6"
+  }
+}
